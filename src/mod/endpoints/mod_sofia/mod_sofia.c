@@ -40,6 +40,9 @@
 /*************************************************************************************************************************************************************/
 #include "mod_sofia.h"
 #include "sofia-sip/sip_extra.h"
+#ifdef SOFIA_ISUP
+#include <sng_decoder.h>
+#endif
 
 SWITCH_MODULE_LOAD_FUNCTION(mod_sofia_load);
 SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_sofia_shutdown);
@@ -5750,6 +5753,51 @@ SWITCH_STANDARD_APP(sofia_sla_function)
 	switch_ivr_eavesdrop_session(session, data, NULL, ED_MUX_READ | ED_MUX_WRITE | ED_COPY_DISPLAY);
 }
 
+#ifdef SOFIA_ISUP
+static sng_decoder_event_interface_t sng_event;
+static void handle_isup_tapping_log(uint8_t level, char *fmt, ...)
+{
+	char	*data;
+	int	ret;
+	va_list	ap;
+	va_start(ap, fmt);
+	ret = switch_vasprintf(&data, fmt, ap);
+	if (ret == -1) {
+		goto end;
+	}
+	switch (level) {
+	/**************************************************************************/
+	case SNG_LOGLEVEL_DEBUG:
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "sng_decoder_lib->%s", data);
+		break;
+	/**************************************************************************/
+	case SNG_LOGLEVEL_WARN:
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "sng_decoder_lib->%s", data);
+		break;
+	/**************************************************************************/
+	case SNG_LOGLEVEL_INFO:
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "sng_decoder_lib->%s", data);
+		break;
+	/**************************************************************************/
+	case SNG_LOGLEVEL_ERROR:
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "sng_decoder_lib->%s", data);
+		break;
+	/**************************************************************************/
+	case SNG_LOGLEVEL_CRIT:
+		/*printf("%s",data);*/
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT, "sng_decoder_lib->%s", data);
+		break;
+	/**************************************************************************/
+	default:
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "sng_decoder_lib->%s", data);
+		break;
+	/**************************************************************************/
+	}
+end:
+	switch_safe_free(data);
+	va_end(ap);
+}
+#endif
 
 SWITCH_MODULE_LOAD_FUNCTION(mod_sofia_load)
 {
@@ -6043,6 +6091,10 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_sofia_load)
 
 	crtp_init(*module_interface);
 
+#ifdef SOFIA_ISUP
+	sng_event.sng_log = ((void (*)(uint8_t level, char *fmt, ...))handle_isup_tapping_log);
+	sng_isup_decoder_lib_init(&sng_event);
+#endif
 	/* indicate that the module should continue to be loaded */
 	return SWITCH_STATUS_SUCCESS;
 
@@ -6117,6 +6169,9 @@ void mod_sofia_shutdown_cleanup() {
 	}
 
 	su_deinit();
+#ifdef SOFIA_ISUP
+	sng_isup_decoder_lib_deinit();
+#endif
 
 	switch_mutex_lock(mod_sofia_globals.hash_mutex);
 	switch_core_hash_destroy(&mod_sofia_globals.profile_hash);

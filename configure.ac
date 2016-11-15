@@ -619,6 +619,10 @@ have_openal=no
 AC_CHECK_LIB(openal, alMidiGainSOFT, [have_openal="yes"])
 AM_CONDITIONAL([HAVE_OPENAL],[test "${have_openal}" = "yes"])
 
+have_sng_decoder=no
+AC_CHECK_LIB(sng_decoder, sng_isup_decoder_lib_init, [have_sng_decoder="yes"])
+AM_CONDITIONAL([HAVE_SNG_DECODER],[test "${have_sng_decoder}" = "yes"])
+
 AC_ARG_ENABLE(zrtp,
 	[AS_HELP_STRING([--enable-zrtp], [Compile with zrtp Support])],,[enable_zrtp="no"])
 if test "x$enable_zrtp" = "xyes" ; then

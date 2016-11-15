@@ -36,6 +36,11 @@ if ISMAC
 mod_sofia_la_LDFLAGS += -framework CoreFoundation -framework SystemConfiguration
 endif
 
+if HAVE_SNG_DECODER
+mod_sofia_la_CFLAGS += -DSOFIA_ISUP
+mod_sofia_la_LDFLAGS += -lsng_decoder
+endif
+
 BUILT_SOURCES = $(SOFIALA)
 
 $(mod_sofia_la_SOURCES) : $(BUILT_SOURCES)

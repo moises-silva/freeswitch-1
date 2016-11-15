@@ -1223,6 +1223,48 @@ void sofia_reg_close_handles(sofia_profile_t *profile);
 void write_csta_xml_chunk(switch_event_t *event, switch_stream_handle_t stream, const char *csta_event, char *fwd_type);
 void sofia_glue_clear_soa(switch_core_session_t *session, switch_bool_t partner);
 
+#ifdef SOFIA_ISUP
+#define SOFIA_DECODE_ISUP_EVENT(msgType) \
+((msgType) == M_ADDCOMP)        ?"ADDRESS COMPLETE" : \
+((msgType) == M_ANSWER)         ?"ANSWER" : \
+((msgType) == M_BLOCK)          ?"BLOCK" : \
+((msgType) == M_BLOCKACK)       ?"BLOCK ACK" : \
+((msgType) == M_CALLMODCOMP)    ?"CALL MODIFY COMPLETE" : \
+((msgType) == M_CALLMODREQ)     ?"CALL MODIFY REQUEST" : \
+((msgType) == M_CALLMODREJ)     ?"CALL MODIFY REJECT" : \
+((msgType) == M_CALLPROG)       ?"CALL PROGRESS" : \
+((msgType) == M_CIRGRPBLK)      ?"CIRCUIT GROUP BLOCK" : \
+((msgType) == M_CIRGRPBLKACK)   ?"CIRCUIT GROUP BLOCK ACK" : \
+((msgType) == M_CIRGRPQRY)      ?"CIRCUIT GROUP QUERY" : \
+((msgType) == M_CIRGRPQRYRES)   ?"CIRCUIT GROUP QUERY RESPONSE" : \
+((msgType) == M_CIRGRPRES)      ?"CIRCUIT GROUP RESET" : \
+((msgType) == M_CIRGRPRESACK)   ?"CIRCUIT GROUP RESET ACK" : \
+((msgType) == M_CIRGRPUBLK)     ?"CIRCUIT GROUP UNBLOCK" : \
+((msgType) == M_CONFUSION)      ?"CONFUSION" : \
+((msgType) == M_CONTINUITY)     ?"CONTINUITY" : \
+((msgType) == M_DELREL)         ?"DELAYED RELEASE" : \
+((msgType) == M_FACACC)         ?"FACILITY ACCEPTED" : \
+((msgType) == M_FACREJ)         ?"FACILITY REJECTED" : \
+((msgType) == M_FACREQ)         ?"FACILITY REQUESTED" : \
+((msgType) == M_FWDTFER)        ?"FORWARD TRANSFER" : \
+((msgType) == M_INFORMTN)       ?"INFORMATION" : \
+((msgType) == M_INFOREQ)        ?"INFORMATION REQUEST" : \
+((msgType) == M_INIADDR)        ?"INITIAL ADDRESS" : \
+((msgType) == M_LOOPBCKACK)     ?"LOOP BACK ACK" : \
+((msgType) == M_OVERLOAD)       ?"OVERLOAD" : \
+((msgType) == M_PASSALNG)       ?"PASS ALONG" : \
+((msgType) == M_RELSE)          ?"RELEASE" : \
+((msgType) == M_RELCOMP)        ?"RELEASE COMPLETE" : \
+((msgType) == M_RESCIR)         ?"RESET CIRCUIT" : \
+((msgType) == M_RESUME)         ?"RESUME" : \
+((msgType) == M_SUBADDR)        ?"SUBSEQUENT ADDRESS" :\
+((msgType) == M_SUSPND)         ?"SUSPEND" : \
+((msgType) == M_UNBLK)          ?"UNBLOCK" : \
+((msgType) == M_UNBLKACK)       ?"UNBLOCK ACK" : \
+"Unknown ISUP Event"
+#endif
+
+
 /* For Emacs:
  * Local Variables:
  * mode:c

@@ -41,6 +41,9 @@
  */
 #include "mod_sofia.h"
 
+#ifdef SOFIA_ISUP
+#include <sng_decoder.h>
+#endif
 
 extern su_log_t tport_log[];
 extern su_log_t iptsec_log[];
@@ -10382,12 +10385,48 @@ void sofia_handle_sip_i_invite(switch_core_session_t *session, nua_t *nua, sofia
 
 
 	if (sip->sip_multipart) {
+#ifdef SOFIA_ISUP
+		sng_isup_decoder_interface_t intf;
+#endif
 		msg_multipart_t *mp;
-
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Multipart invite received\n");
 		for (mp = sip->sip_multipart; mp; mp = mp->mp_next) {
 			if (mp->mp_payload && mp->mp_payload->pl_data && mp->mp_content_type && mp->mp_content_type->c_type) {
-				char *val = switch_core_session_sprintf(session, "%s:%s", mp->mp_content_type->c_type, mp->mp_payload->pl_data);
-				switch_channel_add_variable_var_check(channel, "sip_multipart", val, SWITCH_FALSE, SWITCH_STACK_PUSH);
+#ifdef SOFIA_ISUP
+				if (!strcasecmp(mp->mp_content_type->c_type, "application/isup")) {
+					// Do not set the whole isup content as a session variable as it's binary
+					// rather attempt to decode it and set some known fields in variables
+					uint8_t msgType;
+					unsigned char *isupbuf = calloc(1, mp->mp_payload->pl_len + 2);
+					void *cb = sng_isup_decoder_getcb();
+					isup_decoder_init(cb);
+					memcpy(&isupbuf[2], mp->mp_payload->pl_data, mp->mp_payload->pl_len);
+					msgType = (uint8_t)isup_decode(LSI_SW_ITU, isupbuf, mp->mp_payload->pl_len + 2, cb, &intf);
+					if (msgType) {
+						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
+								          "application/isup %s Message(%d) received\n",
+								          SOFIA_DECODE_ISUP_EVENT(msgType), msgType);
+						if (msgType == M_INIADDR) {
+							switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "%s Message(%d) received from %s to %s (cpc=%d)\n",
+							SOFIA_DECODE_ISUP_EVENT(msgType), msgType, intf.clg_data.num, intf.cld_data.num, intf.clg_data.cpc);
+							switch_channel_set_variable(channel, "sip_isup_iam_calling_number", intf.clg_data.num);
+							switch_channel_set_variable_printf(channel, "sip_isup_iam_calling_party_category", "%d", intf.clg_data.cpc);
+							switch_channel_set_variable(channel, "sip_isup_iam_called_number", intf.cld_data.num);
+						} else {
+							switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Ignoring isup message %s (%d) received on an invite\n", SOFIA_DECODE_ISUP_EVENT(msgType), msgType);
+						}
+					} else {
+						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to decode isup multipart payload\n");
+					}
+					sng_isup_decoder_freecb(cb);
+					free(isupbuf);
+				} else {
+#endif
+					char *val = switch_core_session_sprintf(session, "%s:%s", mp->mp_content_type->c_type, mp->mp_payload->pl_data);
+					switch_channel_add_variable_var_check(channel, "sip_multipart", val, SWITCH_FALSE, SWITCH_STACK_PUSH);
+#if SOFIA_ISUP
+				}
+#endif
 			}
 		}
 	}
