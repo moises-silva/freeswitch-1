@@ -743,7 +743,8 @@ switch_status_t sofia_glue_do_invite(switch_core_session_t *session)
 	const char *force_full_from = switch_channel_get_variable(tech_pvt->channel, "sip_force_full_from");
 	const char *force_full_to = switch_channel_get_variable(tech_pvt->channel, "sip_force_full_to");
 	const char *content_encoding = switch_channel_get_variable(tech_pvt->channel, "sip_content_encoding");
-	char *mp = NULL, *mp_type = NULL;
+	sip_payload_t *mp = NULL;
+	char *mp_type = NULL;
 	char *record_route = NULL;
 	const char *recover_via = NULL;
 	int require_timer = 1;
@@ -1361,12 +1362,12 @@ switch_status_t sofia_glue_do_invite(switch_core_session_t *session)
 				   TAG_IF(content_encoding, SIPTAG_CONTENT_ENCODING_STR(content_encoding)),
 				   NUTAG_MEDIA_ENABLE(0),
 				   SIPTAG_CONTENT_TYPE_STR(mp_type ? mp_type : "application/sdp"),
-				   SIPTAG_PAYLOAD_STR(mp ? mp : tech_pvt->mparams.local_sdp_str), TAG_IF(rep, SIPTAG_REPLACES_STR(rep)), SOATAG_HOLD(holdstr), TAG_END());
+				   SIPTAG_PAYLOAD(mp ? mp : sip_payload_create(tech_pvt->nh->nh_home, tech_pvt->mparams.local_sdp_str, strlen(tech_pvt->mparams.local_sdp_str))),
+				   TAG_IF(rep, SIPTAG_REPLACES_STR(rep)), SOATAG_HOLD(holdstr), TAG_END());
 	}
 
 	sofia_glue_free_destination(dst);
 	switch_safe_free(extra_headers);
-	switch_safe_free(mp);
 	tech_pvt->redirected = NULL;
 
 	return SWITCH_STATUS_SUCCESS;

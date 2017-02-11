@@ -1186,7 +1186,7 @@ const char *sofia_sip_user_status_name(sofia_sip_user_status_t status);
 void sofia_reg_fire_custom_sip_user_state_event(sofia_profile_t *profile, const char *sip_user, const char *contact,
 							const char* from_user, const char* from_host, const char *call_id, sofia_sip_user_status_t status, int options_res, const char *phrase);
 uint32_t sofia_reg_reg_count(sofia_profile_t *profile, const char *user, const char *host);
-char *sofia_media_get_multipart(switch_core_session_t *session, const char *prefix, const char *sdp, char **mp_type);
+sip_payload_t *sofia_media_get_multipart(switch_core_session_t *session, const char *prefix, const char *sdp, char **mp_type);
 int sofia_glue_tech_simplify(private_object_t *tech_pvt);
 switch_console_callback_match_t *sofia_reg_find_reg_url_multi(sofia_profile_t *profile, const char *user, const char *host);
 switch_console_callback_match_t *sofia_reg_find_reg_url_with_positive_expires_multi(sofia_profile_t *profile, const char *user, const char *host, time_t reg_time, const char *contact_str, long exptime);
@@ -1262,6 +1262,9 @@ void sofia_glue_clear_soa(switch_core_session_t *session, switch_bool_t partner)
 ((msgType) == M_UNBLK)          ?"UNBLOCK" : \
 ((msgType) == M_UNBLKACK)       ?"UNBLOCK ACK" : \
 "Unknown ISUP Event"
+
+#define SOFIA_ISUP_PAYLOAD_PVT "sofia::isup_payload"
+#define SOFIA_ISUP_PAYLOAD_LEN_PVT "sofia::isup_payload_len"
 #endif
 
 

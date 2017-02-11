@@ -4844,6 +4844,19 @@ static switch_call_cause_t sofia_outgoing_channel(switch_core_session_t *session
 			}
 		}
 
+#ifdef SOFIA_ISUP
+		{
+			void *isup_payload = switch_channel_get_private(o_channel, SOFIA_ISUP_PAYLOAD_PVT);
+			size_t isup_payload_len = (size_t)(unsigned long)switch_channel_get_private(o_channel, SOFIA_ISUP_PAYLOAD_LEN_PVT);
+			if (isup_payload) {
+				void *n_isup_payload = switch_core_session_alloc(nsession, isup_payload_len);
+				memcpy(n_isup_payload, isup_payload, isup_payload_len);
+				switch_channel_set_private(nchannel, SOFIA_ISUP_PAYLOAD_PVT, n_isup_payload);
+				switch_channel_set_private(nchannel, SOFIA_ISUP_PAYLOAD_LEN_PVT, (void *)(unsigned long)isup_payload_len);
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "[isup] Found outbound isup payload of len %zd\n", isup_payload_len);
+			}
+		}
+#endif
 		switch_core_media_check_outgoing_proxy(nsession, session);
 
 	}

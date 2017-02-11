@@ -10398,20 +10398,25 @@ void sofia_handle_sip_i_invite(switch_core_session_t *session, nua_t *nua, sofia
 					// rather attempt to decode it and set some known fields in variables
 					uint8_t msgType;
 					unsigned char *isupbuf = calloc(1, mp->mp_payload->pl_len + 2);
+					unsigned char *mpdata = switch_core_session_alloc(session, mp->mp_payload->pl_len);
 					void *cb = sng_isup_decoder_getcb();
 					isup_decoder_init(cb);
+					memcpy(mpdata, mp->mp_payload->pl_data, mp->mp_payload->pl_len);
 					memcpy(&isupbuf[2], mp->mp_payload->pl_data, mp->mp_payload->pl_len);
 					msgType = (uint8_t)isup_decode(LSI_SW_ITU, isupbuf, mp->mp_payload->pl_len + 2, cb, &intf);
 					if (msgType) {
 						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
-								          "application/isup %s Message(%d) received\n",
-								          SOFIA_DECODE_ISUP_EVENT(msgType), msgType);
+								          "application/isup %s Message(%d) received with length %d\n",
+								          SOFIA_DECODE_ISUP_EVENT(msgType), msgType, mp->mp_payload->pl_len);
 						if (msgType == M_INIADDR) {
 							switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "%s Message(%d) received from %s to %s (cpc=%d)\n",
 							SOFIA_DECODE_ISUP_EVENT(msgType), msgType, intf.clg_data.num, intf.cld_data.num, intf.clg_data.cpc);
 							switch_channel_set_variable(channel, "sip_isup_iam_calling_number", intf.clg_data.num);
 							switch_channel_set_variable_printf(channel, "sip_isup_iam_calling_party_category", "%d", intf.clg_data.cpc);
 							switch_channel_set_variable(channel, "sip_isup_iam_called_number", intf.cld_data.num);
+							/* Store the original isup message for later retrieval */
+							switch_channel_set_private(channel, SOFIA_ISUP_PAYLOAD_PVT, mpdata);
+							switch_channel_set_private(channel, SOFIA_ISUP_PAYLOAD_LEN_PVT, (void *)(unsigned long)mp->mp_payload->pl_len);
 						} else {
 							switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Ignoring isup message %s (%d) received on an invite\n", SOFIA_DECODE_ISUP_EVENT(msgType), msgType);
 						}

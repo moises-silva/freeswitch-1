@@ -111,9 +111,13 @@ static void process_mp(switch_core_session_t *session, switch_stream_handle_t *s
 	}
 }
 
-char *sofia_media_get_multipart(switch_core_session_t *session, const char *prefix, const char *sdp, char **mp_type)
+sip_payload_t *sofia_media_get_multipart(switch_core_session_t *session, const char *prefix, const char *sdp, char **mp_type)
 {
-	char *extra_headers = NULL;
+#ifdef SOFIA_ISUP
+	void *isup_payload = NULL;
+	size_t isup_len = 0;
+#endif
+	private_object_t *tech_pvt = switch_core_session_get_private(session);
 	switch_stream_handle_t stream = { 0 };
 	switch_event_header_t *hi = NULL;
 	int x = 0;
@@ -145,6 +149,35 @@ char *sofia_media_get_multipart(switch_core_session_t *session, const char *pref
 
 	if (x) {
 		*mp_type = switch_core_session_sprintf(session, "multipart/mixed; boundary=%s", boundary);
+#ifdef SOFIA_ISUP
+		isup_payload = switch_channel_get_private(channel, SOFIA_ISUP_PAYLOAD_PVT);
+		isup_len = (size_t)(unsigned long)switch_channel_get_private(channel, SOFIA_ISUP_PAYLOAD_LEN_PVT);
+		if (isup_payload) {
+			size_t len, offset;
+			msg_content_type_t *c;
+			msg_multipart_t *mp;
+			msg_payload_t *pl;
+			msg_header_t *h = NULL;
+			char *b;
+			msg_t *msg = msg_create(sip_default_mclass(), 0);
+			c = sip_content_type_make(tech_pvt->nh->nh_home, *mp_type);
+			mp = msg_multipart_create(tech_pvt->nh->nh_home, "application/sdp", sdp, strlen(sdp));
+			mp->mp_next = msg_multipart_create(tech_pvt->nh->nh_home, "application/isup;version=itu-t92+", isup_payload, isup_len);
+			msg_multipart_complete(tech_pvt->nh->nh_home, c, mp);
+			h = NULL;
+			msg_multipart_serialize(&h, mp);
+			len = msg_multipart_prepare(msg, mp, 0);
+			pl = sip_payload_create(tech_pvt->nh->nh_home, NULL, len);
+			b = pl->pl_data;
+			for (offset = 0, h = (msg_header_t *)mp; offset < len; h = h->sh_succ) {
+				memcpy(b + offset, h->sh_data, h->sh_len);
+				offset += h->sh_len;
+			}
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "[isup] Returning multipart/mixed isup payload of len %zd\n", isup_len);
+			switch_safe_free(stream.data);
+			return pl;
+		}
+#endif
 		if (sdp) {
 			stream.write_function(&stream, "--%s\r\nContent-Type: application/sdp\r\nContent-Length: %d\r\n\r\n%s\r\n", boundary, strlen(sdp) + 1, sdp);
 		}
@@ -152,12 +185,11 @@ char *sofia_media_get_multipart(switch_core_session_t *session, const char *pref
 	}
 
 	if (!zstr((char *) stream.data)) {
-		extra_headers = stream.data;
+		return sip_payload_create(tech_pvt->nh->nh_home, stream.data, strlen(stream.data));
 	} else {
 		switch_safe_free(stream.data);
+		return NULL;
 	}
-
-	return extra_headers;
 }
 
 
