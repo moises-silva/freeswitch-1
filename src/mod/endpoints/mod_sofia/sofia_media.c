@@ -111,11 +111,148 @@ static void process_mp(switch_core_session_t *session, switch_stream_handle_t *s
 	}
 }
 
+#ifdef SOFIA_ISUP
+const char *sofia_media_decode_isup_number(switch_core_session_t *session, uint8_t *number)
+{
+	uint8_t octet, bufidx;
+	uint8_t length = number[0]; // first octet is the length
+	// second octet is the odd/even indicator and nai (nature of address indicator)
+	// but we don't care about nai, so just take the odd/even indicator
+	uint8_t is_even = ((number[1] & 0x80) == 0);
+	char *numbuf;
+	// the third octet contains inn indicator and numbering plan, we ignore them here
+	// and start decoding the address signals at the fourth octet (third
+	// octet if we don't count the length as part of the parameter as in
+	// figure C-9 section C 3.7 of the Q.767 spec
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_CRIT,
+					  "[isup] Found isup number of length %d\n", length);
+	// length * 2 is actually more than we need since the length
+	// includes 2 other octets that are not address signals
+	numbuf = switch_core_session_alloc(session, length * 2);
+	octet = 3;
+	bufidx = 0;
+	length -= 2; // rmeove the 2 non-signal octets from the length
+	while (length) {
+		bufidx += sprintf(&numbuf[bufidx], "%d", (number[octet] & 0x0F));
+		if (is_even || length > 1) {
+			bufidx += sprintf(&numbuf[bufidx], "%d", (number[octet] >> 4));
+		}
+		length -= 1;
+		octet++;
+	}
+	return numbuf;
+}
+
+
+// Refer to table C-16 of the Q.767 spec, but basically an IAM is
+// composed as a set of fixed length mandatory paramaters:
+// - message type, nature of connection indicators,
+//   forward call indicators, calling party category
+// Then followed by a single mandatory parameter of variable length:
+// - called party number
+// Then followed by optional parameters of variable length:
+// - calling party number
+// - optional forward call indicators
+// Note that the order of the optional parameters is not guaranteed, so
+// inside the byte stream you can get first the optional forward call
+// indicators and then the calling party number or viceversa. Here we're
+// only interested at the moment my the calling party number, which is
+// identified by the type 10 and described in section C 3.8
+#define isup_calling_party_category_offset 0x4
+#define isup_called_number_pointer_offset 0x6
+#define isup_optional_parameters_pointer_offset 0x7
+#define isup_calling_number_parameter_id 0xa
+void *sofia_media_manipulate_isup_iam(switch_core_session_t *session, switch_channel_t *channel,
+		                          uint8_t *isup_payload, size_t isup_len, size_t *new_isup_len)
+{
+#define debug 0
+#if debug
+	int i = 0;
+#endif
+	uint32_t called_number_ptr, optional_parameters_ptr;
+	uint8_t *called_number, *calling_number, *optional_parameters;
+	const char *user_cpc, *user_called_number, *user_calling_number;
+	void *new_isup_payload = isup_payload;
+	*new_isup_len = isup_len;
+#if debug
+	switch_stream_handle_t stream = { 0 };
+	SWITCH_STANDARD_STREAM(stream);
+	for (i = 0; i <= isup_len; i++) {
+		stream.write_function(&stream, "0x%X ", isup_payload[i]);
+		if (i && !(i % 8)) {
+			stream.write_function(&stream, "\n");
+		}
+	}
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_CRIT,
+					  "[isup] %s\n", (char *)stream.data);
+#endif
+	// Manipulate the cpc if specified
+	user_cpc = switch_channel_get_variable(channel, "sip_isup_iam_calling_party_category");
+	if (user_cpc) {
+		isup_payload[isup_calling_party_category_offset] = (uint8_t)atoi(user_cpc);
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_CRIT,
+						  "[isup] Set outbound cpc to %d\n", isup_payload[isup_calling_party_category_offset]);
+	} else {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_CRIT,
+						  "[isup] No outbound cpc specified, keeping original %d\n",
+						  isup_payload[isup_calling_party_category_offset]);
+	}
+
+	// Manipulate the called number
+	// the called number is a fixed mandatory variable parameter
+	// so we know it'll always be in the same place, we just need to
+	// find the pointer to it and decode the address.
+	user_called_number = switch_channel_get_variable(channel, "sip_isup_iam_called_number");
+	if (user_called_number) {
+		called_number_ptr = isup_payload[isup_called_number_pointer_offset];
+		called_number = &isup_payload[isup_called_number_pointer_offset + called_number_ptr];
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_CRIT,
+						  "[isup] Decoded called number: %s\n", sofia_media_decode_isup_number(session, called_number));
+	}
+
+	// Manipulate the calling number, but first we must find it in the optional parameters
+	user_calling_number = switch_channel_get_variable(channel, "sip_isup_iam_calling_number");
+	if (user_calling_number) {
+		optional_parameters_ptr = isup_payload[isup_optional_parameters_pointer_offset];
+		optional_parameters = &isup_payload[isup_optional_parameters_pointer_offset + optional_parameters_ptr];
+		// iterate over optional parameters until we find the calling number or run out of parameters
+		calling_number = NULL;
+		while (optional_parameters[0]) {
+			if (optional_parameters[0] != isup_calling_number_parameter_id) {
+				// this is not the calling number
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_CRIT,
+								  "[isup] Ignoring parameter type: %d\n", optional_parameters[0]);
+				// skip the parameter contents and we'll get to the next parameter type
+				optional_parameters = &optional_parameters[2 + optional_parameters[1]];
+			} else {
+				// found the calling number parameter, skip the type and point to its length
+				calling_number = &optional_parameters[1];
+				break;
+			}
+		}
+		if (calling_number) {
+			// manipulate here
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_CRIT,
+							  "[isup] Decoded calling number: %s\n", sofia_media_decode_isup_number(session, calling_number));
+		} else {
+			// no calling number found, add it, how do we remove it?
+			// should we force the user to always set this if they want
+			// a value instead of defaulting to passing thru? or should
+			// they set it to 'unset' or some other special string to
+			// unset it?
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_CRIT,
+							  "[isup] Calling number not found!\n");
+		}
+	}
+	return new_isup_payload;
+}
+#endif
+
 sip_payload_t *sofia_media_get_multipart(switch_core_session_t *session, const char *prefix, const char *sdp, char **mp_type)
 {
 #ifdef SOFIA_ISUP
-	void *isup_payload = NULL;
-	size_t isup_len = 0;
+	void *isup_payload = NULL, *new_isup_payload = NULL;
+	size_t isup_len = 0, new_isup_len = 0;
 #endif
 	private_object_t *tech_pvt = switch_core_session_get_private(session);
 	switch_stream_handle_t stream = { 0 };
@@ -154,15 +291,17 @@ sip_payload_t *sofia_media_get_multipart(switch_core_session_t *session, const c
 		isup_len = (size_t)(unsigned long)switch_channel_get_private(channel, SOFIA_ISUP_PAYLOAD_LEN_PVT);
 		if (isup_payload) {
 			size_t len, offset;
+			msg_t *msg;
 			msg_content_type_t *c;
 			msg_multipart_t *mp;
 			msg_payload_t *pl;
 			msg_header_t *h = NULL;
 			char *b;
-			msg_t *msg = msg_create(sip_default_mclass(), 0);
+			new_isup_payload = sofia_media_manipulate_isup_iam(session, channel, isup_payload, isup_len, &new_isup_len);
+			msg = msg_create(sip_default_mclass(), 0);
 			c = sip_content_type_make(tech_pvt->nh->nh_home, *mp_type);
 			mp = msg_multipart_create(tech_pvt->nh->nh_home, "application/sdp", sdp, strlen(sdp));
-			mp->mp_next = msg_multipart_create(tech_pvt->nh->nh_home, "application/isup;version=itu-t92+", isup_payload, isup_len);
+			mp->mp_next = msg_multipart_create(tech_pvt->nh->nh_home, "application/isup;version=itu-t92+", new_isup_payload, isup_len);
 			msg_multipart_complete(tech_pvt->nh->nh_home, c, mp);
 			h = NULL;
 			msg_multipart_serialize(&h, mp);
