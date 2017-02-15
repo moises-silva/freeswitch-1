@@ -112,16 +112,22 @@ static void process_mp(switch_core_session_t *session, switch_stream_handle_t *s
 }
 
 #ifdef SOFIA_ISUP
-const char *sofia_media_decode_isup_number(switch_core_session_t *session, uint8_t *number)
+const char *sofia_media_decode_isup_number(switch_core_session_t *session, uint8_t *number, uint8_t *nai, uint8_t *inni, uint8_t *numbering_plan)
 {
 	uint8_t octet, bufidx;
 	uint8_t length = number[0]; // first octet is the length
-	// second octet is the odd/even indicator and nai (nature of address indicator)
-	// but we don't care about nai, so just take the odd/even indicator
+	// second octet is the odd/even indicator and nai
 	uint8_t is_even = ((number[1] & 0x80) == 0);
 	char *numbuf;
-	// the third octet contains inn indicator and numbering plan, we ignore them here
-	// and start decoding the address signals at the fourth octet (third
+
+	// get the nai now
+	*nai = (number[1] & 0x7F);
+
+	// the third octet contains inn indicator and numbering plan
+	*inni = (number[2] & 0x80) ? 1 : 0;
+	*numbering_plan = ((number[2] & 0x70) >> 4);
+
+	// start decoding the address signals at the fourth octet (third
 	// octet if we don't count the length as part of the parameter as in
 	// figure C-9 section C 3.7 of the Q.767 spec
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_CRIT,
@@ -131,7 +137,7 @@ const char *sofia_media_decode_isup_number(switch_core_session_t *session, uint8
 	numbuf = switch_core_session_alloc(session, length * 2);
 	octet = 3;
 	bufidx = 0;
-	length -= 2; // rmeove the 2 non-signal octets from the length
+	length -= 2; // remove the 2 non-signal octets from the length
 	while (length) {
 		bufidx += sprintf(&numbuf[bufidx], "%d", (number[octet] & 0x0F));
 		if (is_even || length > 1) {
@@ -189,6 +195,8 @@ void *sofia_media_manipulate_isup_iam(switch_core_session_t *session, switch_cha
 	uint8_t *called_number, *calling_number, *optional_parameters;
 	const char *user_cpc, *user_called_number, *user_calling_number;
 	size_t optional_parameters_len;
+	uint8_t calling_nai, calling_inni, calling_numbering_plan, called_nai, called_inni, called_numbering_plan;
+	const char *calling_number_s, *called_number_s;
 
 	// collect the parameters we allow to manipulate (currently just cpc and called/calling numbers)
 	user_cpc = switch_channel_get_variable(channel, "sip_isup_iam_calling_party_category");
@@ -215,8 +223,10 @@ void *sofia_media_manipulate_isup_iam(switch_core_session_t *session, switch_cha
 	// find the pointer to it
 	called_number_ptr = isup_payload[isup_called_number_pointer_offset];
 	called_number = &isup_payload[isup_called_number_pointer_offset + called_number_ptr];
+	called_number_s = sofia_media_decode_isup_number(session, called_number, &called_nai, &called_inni, &called_numbering_plan);
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_CRIT,
-					  "[isup] Decoded called number: %s\n", sofia_media_decode_isup_number(session, called_number));
+					 "[isup] Decoded called number: %s (nai=%u, inni=%u, plan=%u)\n",
+					 called_number_s, called_nai, called_inni, called_numbering_plan);
 
 	// Find the calling number in the optional parameters
 	optional_parameters_ptr = isup_payload[isup_optional_parameters_pointer_offset];
@@ -243,8 +253,10 @@ void *sofia_media_manipulate_isup_iam(switch_core_session_t *session, switch_cha
 	}
 
 	if (calling_number) {
+		calling_number_s = sofia_media_decode_isup_number(session, calling_number, &calling_nai, &calling_inni, &calling_numbering_plan);
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_CRIT,
-						  "[isup] Decoded calling number: %s\n", sofia_media_decode_isup_number(session, calling_number));
+						  "[isup] Decoded calling number: %s (nai=%u, inni=%u, plan=%u)\n",
+						  calling_number_s, calling_nai, calling_inni, calling_numbering_plan);
 	}
 
 	// Now we have all the information to allocate a new isup buffer
@@ -314,16 +326,16 @@ void *sofia_media_manipulate_isup_iam(switch_core_session_t *session, switch_cha
 	}
 
 	// Manipulate the called number if specified
-	if (0 || user_called_number) {
-		// XXX FIXME XXX
-		// here we have to fix the optional parameter index
+	if (user_called_number) {
+		// override the called number with the encoded number
+		//called_number = sofia_media_encode_isup_number(session, user_called_number, nai, inn, numbering_plan);
+		// we have to fix the optional parameter index
 		// because that depends on the length of the called number parameter
-		new_isup_payload[isup_optional_parameters_pointer_offset] = 0x00;
-	} else {
-		// use the existing one
-		memcpy(&new_isup_payload[payload_idx], called_number, (1 + called_number[0]));
-		payload_idx += (1 + called_number[0]);
+		//new_isup_payload[isup_optional_parameters_pointer_offset] = 0x00;
 	}
+	// Copy the called number into the new isup payload
+	memcpy(&new_isup_payload[payload_idx], called_number, (1 + called_number[0]));
+	payload_idx += (1 + called_number[0]);
 
 	// Copy all optional parameters, manipulating the calling number if present
 	optional_parameters = &isup_payload[isup_optional_parameters_pointer_offset + optional_parameters_ptr];
