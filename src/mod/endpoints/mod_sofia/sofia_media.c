@@ -112,6 +112,18 @@ static void process_mp(switch_core_session_t *session, switch_stream_handle_t *s
 }
 
 #ifdef SOFIA_ISUP
+static uint32_t bcd_len(const char *num)
+{
+	// if the number of digits is even, we divide by 2 and take that
+	// if it's odd, we add 1 because of the required spare filling
+	uint32_t numlen = strlen(num);
+	uint32_t len = (numlen / 2);
+	if ((numlen % 2)) {
+		len += 1;
+	}
+	return len;
+}
+
 const char *sofia_media_decode_isup_number(switch_core_session_t *session, uint8_t *number, uint8_t *nai, uint8_t *inni, uint8_t *numbering_plan)
 {
 	uint8_t octet, bufidx;
@@ -149,16 +161,54 @@ const char *sofia_media_decode_isup_number(switch_core_session_t *session, uint8
 	return numbuf;
 }
 
-static uint32_t bcd_len(const char *num)
+uint8_t *sofia_media_encode_isup_number(switch_core_session_t *session,
+		                                const char *number,
+										uint8_t nai,
+										uint8_t inni,
+										uint8_t numbering_plan)
 {
-	// if the number of digits is even, we divide by 2 and take that
-	// if it's odd, we add 1 because of the required spare filling
-	uint32_t numlen = strlen(num);
-	uint32_t len = (numlen / 2);
-	if ((numlen % 2)) {
-		len += 1;
+	uint8_t octet, is_even;
+	const char *digit;
+	size_t encoded_len = bcd_len(number) + 3;
+	uint8_t *encoded_number = switch_core_session_alloc(session, encoded_len);
+
+	// set the length
+	encoded_number[0] = (encoded_len - 1);
+
+	// set the nai in the second octet
+	encoded_number[1] |= (nai & 0x7F);
+
+	// the third octet contains inn indicator and numbering plan
+	encoded_number[2] |= ((inni << 7) & 0x80);
+	encoded_number[2] |= ((numbering_plan << 4) & 0x70);
+
+	// start encoding the address signals at the fourth octet (third
+	// octet if we don't count the length as part of the parameter as in
+	// figure C-9 section C 3.7 of the Q.767 spec
+	octet = 0;
+	is_even = 0;
+	digit = number;
+	while (*digit) {
+		if (!isdigit(*digit)) {
+			// ignore any non-digit
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+							  "[isup] Cannot encode non-digit character %c\n", *digit);
+			continue;
+		}
+		if (!is_even) {
+			encoded_number[octet] |= (*digit & 0x0F);
+			is_even = 1;
+		} else {
+			encoded_number[octet] |= ((*digit << 4) & 0xF0);
+			is_even = 0;
+			octet++;
+		}
 	}
-	return len;
+	// set the even/od indicator
+	encoded_number[0] |= (((is_even == 0) << 7) & 0x80);
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_CRIT,
+					  "[isup] Encoded isup number of length %zd\n", strlen(number));
+	return encoded_number;
 }
 
 // Refer to table C-16 of the Q.767 spec, but basically an IAM is
@@ -278,7 +328,7 @@ void *sofia_media_manipulate_isup_iam(switch_core_session_t *session, switch_cha
 	// specified one, we use their length
 	if (user_called_number) {
 		// the length is the length octet + 2 octets for the odd/even
-		// indicator, NAI, INN and numbering plan
+		// indicator, NAI, INN and numbering plan + the digits length
 		new_len += 3 + bcd_len(user_called_number);
 	} else {
 		// use whatever existing length comes in the IAM
@@ -328,10 +378,10 @@ void *sofia_media_manipulate_isup_iam(switch_core_session_t *session, switch_cha
 	// Manipulate the called number if specified
 	if (user_called_number) {
 		// override the called number with the encoded number
-		//called_number = sofia_media_encode_isup_number(session, user_called_number, nai, inn, numbering_plan);
+		called_number = sofia_media_encode_isup_number(session, user_called_number, called_nai, called_inni, called_numbering_plan);
 		// we have to fix the optional parameter index
 		// because that depends on the length of the called number parameter
-		//new_isup_payload[isup_optional_parameters_pointer_offset] = 0x00;
+		new_isup_payload[isup_optional_parameters_pointer_offset] = (called_number[0] + 2);
 	}
 	// Copy the called number into the new isup payload
 	memcpy(&new_isup_payload[payload_idx], called_number, (1 + called_number[0]));
