@@ -142,7 +142,7 @@ const char *sofia_media_decode_isup_number(switch_core_session_t *session, uint8
 	// start decoding the address signals at the fourth octet (third
 	// octet if we don't count the length as part of the parameter as in
 	// figure C-9 section C 3.7 of the Q.767 spec
-	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_CRIT,
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
 					  "[isup] Found isup number of length %d\n", length);
 	// length * 2 is actually more than we need since the length
 	// includes 2 other octets that are not address signals
@@ -185,29 +185,31 @@ uint8_t *sofia_media_encode_isup_number(switch_core_session_t *session,
 	// start encoding the address signals at the fourth octet (third
 	// octet if we don't count the length as part of the parameter as in
 	// figure C-9 section C 3.7 of the Q.767 spec
-	octet = 0;
-	is_even = 0;
+	octet = 3;
+	is_even = 1;
 	digit = number;
 	while (*digit) {
 		if (!isdigit(*digit)) {
 			// ignore any non-digit
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
 							  "[isup] Cannot encode non-digit character %c\n", *digit);
+			digit++;
 			continue;
 		}
-		if (!is_even) {
+		if (is_even) {
 			encoded_number[octet] |= (*digit & 0x0F);
-			is_even = 1;
+			is_even = 0;
 		} else {
 			encoded_number[octet] |= ((*digit << 4) & 0xF0);
-			is_even = 0;
+			is_even = 1;
 			octet++;
 		}
+		digit++;
 	}
-	// set the even/od indicator
-	encoded_number[0] |= (((is_even == 0) << 7) & 0x80);
-	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_CRIT,
-					  "[isup] Encoded isup number of length %zd\n", strlen(number));
+	// set the even/odd indicator
+	encoded_number[1] |= (((is_even == 0) << 7) & 0x80);
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+					  "[isup] Encoded isup number of length %zd in %zd bytes\n", strlen(number), (encoded_len - 3));
 	return encoded_number;
 }
 
@@ -234,7 +236,7 @@ uint8_t *sofia_media_encode_isup_number(switch_core_session_t *session,
 void *sofia_media_manipulate_isup_iam(switch_core_session_t *session, switch_channel_t *channel,
 		                          uint8_t *isup_payload, size_t isup_len, size_t *new_isup_len)
 {
-#define debug 1
+#define debug 0
 #if debug
 	int i = 0;
 #endif
@@ -274,7 +276,7 @@ void *sofia_media_manipulate_isup_iam(switch_core_session_t *session, switch_cha
 	called_number_ptr = isup_payload[isup_called_number_pointer_offset];
 	called_number = &isup_payload[isup_called_number_pointer_offset + called_number_ptr];
 	called_number_s = sofia_media_decode_isup_number(session, called_number, &called_nai, &called_inni, &called_numbering_plan);
-	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_CRIT,
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
 					 "[isup] Decoded called number: %s (nai=%u, inni=%u, plan=%u)\n",
 					 called_number_s, called_nai, called_inni, called_numbering_plan);
 
@@ -292,7 +294,7 @@ void *sofia_media_manipulate_isup_iam(switch_core_session_t *session, switch_cha
 			// 1 octet for the length
 			// N octets for the actual payload (its length is specified by the length octet)
 			optional_parameters_len += 2 + optional_parameters[1];
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_CRIT,
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
 							  "[isup] Ignoring parameter type: %d\n", optional_parameters[0]);
 		} else {
 			// found the calling number parameter, skip the type and point to its length
@@ -304,7 +306,7 @@ void *sofia_media_manipulate_isup_iam(switch_core_session_t *session, switch_cha
 
 	if (calling_number) {
 		calling_number_s = sofia_media_decode_isup_number(session, calling_number, &calling_nai, &calling_inni, &calling_numbering_plan);
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_CRIT,
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
 						  "[isup] Decoded calling number: %s (nai=%u, inni=%u, plan=%u)\n",
 						  calling_number_s, calling_nai, calling_inni, calling_numbering_plan);
 	}
@@ -320,7 +322,7 @@ void *sofia_media_manipulate_isup_iam(switch_core_session_t *session, switch_cha
 	// 06 (pointer to parameter)
 	// 07 (pointer to start of optional part)
 	new_len = isup_mandatory_fixed_parameters_len;
-	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_CRIT,
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
 					  "[isup] isup length started as: %zd\n", new_len);
 
 	// Now the length of the called number (it's a mandatory variable length parameter)
@@ -334,7 +336,7 @@ void *sofia_media_manipulate_isup_iam(switch_core_session_t *session, switch_cha
 		// use whatever existing length comes in the IAM
 		new_len += (1 + called_number[0]); // length octet + the specified parameter length
 	}
-	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_CRIT,
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
 					  "[isup] isup length after adding called number: %zd\n", new_len);
 
 	// Now the length of the calling number
@@ -347,7 +349,7 @@ void *sofia_media_manipulate_isup_iam(switch_core_session_t *session, switch_cha
 		// use the existing length, if any
 		new_len += (2 + calling_number[0]); // type octet + length octet + the specified parameter length
 	}
-	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_CRIT,
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
 					  "[isup] isup length after adding calling number: %zd\n", new_len);
 
 	// finally add the lenght of the extra parameters if any
@@ -356,7 +358,7 @@ void *sofia_media_manipulate_isup_iam(switch_core_session_t *session, switch_cha
 	// allocate the new isup payload buffer
 	new_isup_payload = switch_core_session_alloc(session, new_len);
 	*new_isup_len = new_len;
-	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_CRIT,
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
 					  "[isup] New isup length calculated as: %zd\n", new_len);
 
 	// copy the first fixed part of the IAM
@@ -367,10 +369,10 @@ void *sofia_media_manipulate_isup_iam(switch_core_session_t *session, switch_cha
 	// Manipulate the cpc if specified
 	if (user_cpc) {
 		new_isup_payload[isup_calling_party_category_offset] = (uint8_t)atoi(user_cpc);
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_CRIT,
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
 						  "[isup] Set outbound cpc to %d\n", new_isup_payload[isup_calling_party_category_offset]);
 	} else {
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_CRIT,
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
 						  "[isup] No outbound cpc specified, keeping original %d\n",
 						  new_isup_payload[isup_calling_party_category_offset]);
 	}
@@ -391,14 +393,18 @@ void *sofia_media_manipulate_isup_iam(switch_core_session_t *session, switch_cha
 	optional_parameters = &isup_payload[isup_optional_parameters_pointer_offset + optional_parameters_ptr];
 	while (optional_parameters[0]) {
 		uint32_t parameter_len = 2 + optional_parameters[1]; // type octet, length octet + payload length specified in the length octet
-		if (1 || !user_calling_number || optional_parameters[0] != isup_calling_number_parameter_id) {
+		if (!user_calling_number || optional_parameters[0] != isup_calling_number_parameter_id) {
 			// this is not the calling number (or it is, but we don't
 			// care cuz the user didn't specify one of its own)
 			// copy this parameter into the new isup payload
 			memcpy(&new_isup_payload[payload_idx], optional_parameters, parameter_len);
 			payload_idx += parameter_len;
 		} else {
-			// FIXME: put the new calling number value
+			calling_number = sofia_media_encode_isup_number(session, user_calling_number, calling_nai, calling_inni, calling_numbering_plan);
+			new_isup_payload[payload_idx] = isup_calling_number_parameter_id;
+			payload_idx++;
+			memcpy(&new_isup_payload[payload_idx], calling_number, (1 + calling_number[0]));
+			payload_idx += (1 + calling_number[0]);
 		}
 		// skip the parameter contents and we'll get to the next parameter type
 		optional_parameters = &optional_parameters[parameter_len];
@@ -418,8 +424,7 @@ void *sofia_media_manipulate_isup_iam(switch_core_session_t *session, switch_cha
 		switch_safe_free(stream.data);
 	}
 #endif
-	return isup_payload;
-	//return new_isup_payload;
+	return new_isup_payload;
 }
 #endif
 
