@@ -477,12 +477,14 @@ sip_payload_t *sofia_media_get_multipart(switch_core_session_t *session, const c
 			msg_payload_t *pl;
 			msg_header_t *h = NULL;
 			char *b;
+			su_home_t *home;
 			new_isup_payload = sofia_media_manipulate_isup_iam(session, channel, isup_payload, isup_len, &new_isup_len);
 			msg = msg_create(sip_default_mclass(), 0);
-			c = sip_content_type_make(tech_pvt->nh->nh_home, *mp_type);
-			mp = msg_multipart_create(tech_pvt->nh->nh_home, "application/sdp", sdp, strlen(sdp));
-			mp->mp_next = msg_multipart_create(tech_pvt->nh->nh_home, "application/isup;version=itu-t92+", new_isup_payload, isup_len);
-			msg_multipart_complete(tech_pvt->nh->nh_home, c, mp);
+			home = msg_home(msg);
+			c = sip_content_type_make(home, *mp_type);
+			mp = msg_multipart_create(home, "application/sdp", sdp, strlen(sdp));
+			mp->mp_next = msg_multipart_create(home, "application/isup;version=itu-t92+", new_isup_payload, isup_len);
+			msg_multipart_complete(home, c, mp);
 			h = NULL;
 			msg_multipart_serialize(&h, mp);
 			len = msg_multipart_prepare(msg, mp, 0);
@@ -494,6 +496,7 @@ sip_payload_t *sofia_media_get_multipart(switch_core_session_t *session, const c
 			}
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "[isup] Returning multipart/mixed isup payload of len %zd\n", isup_len);
 			switch_safe_free(stream.data);
+			msg_destroy(msg);
 			return pl;
 		}
 #endif
