@@ -5805,15 +5805,16 @@ SWITCH_STANDARD_APP(sofia_isup_copy_function)
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "isup: %s (no isup data found)\n", (char *) data);
 		goto done;
 	}
-
 	isup_payload_len = (size_t)(unsigned long)switch_channel_get_private(isup_channel, SOFIA_ISUP_PAYLOAD_LEN_PVT);
 	n_isup_payload = switch_core_session_alloc(session, isup_payload_len);
 	memcpy(n_isup_payload, isup_payload, isup_payload_len);
 
+	switch_ivr_transfer_variable(isup_session, session, "sip_multipart");
+	switch_ivr_transfer_variable(isup_session, session, "sip_isup_iam_calling_number");
+	switch_ivr_transfer_variable(isup_session, session, "sip_isup_iam_calling_party_category");
+	switch_ivr_transfer_variable(isup_session, session, "sip_isup_iam_called_number");
+
 	channel = switch_core_session_get_channel(session);
-	switch_channel_set_variable(channel, "sip_isup_iam_calling_number", switch_channel_get_variable(isup_channel, "sip_isup_iam_calling_number"));
-	switch_channel_set_variable(channel, "sip_isup_iam_calling_party_category", switch_channel_get_variable(isup_channel, "sip_isup_iam_calling_party_category"));
-	switch_channel_set_variable(channel, "sip_isup_iam_called_number", switch_channel_get_variable(isup_channel, "sip_isup_iam_called_number"));
 	switch_channel_set_private(channel, SOFIA_ISUP_PAYLOAD_PVT, n_isup_payload);
 	switch_channel_set_private(channel, SOFIA_ISUP_PAYLOAD_LEN_PVT, (void *)(unsigned long)isup_payload_len);
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "[isup] Copied isup payload of len %zd from %s\n",
