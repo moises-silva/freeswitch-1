@@ -41,7 +41,7 @@
 #include "mod_sofia.h"
 #include "sofia-sip/sip_extra.h"
 #ifdef SOFIA_ISUP
-#include <sng_decoder.h>
+#include <sng_decoder/sng_decoder.h>
 #endif
 
 SWITCH_MODULE_LOAD_FUNCTION(mod_sofia_load);
@@ -5767,6 +5767,62 @@ SWITCH_STANDARD_APP(sofia_sla_function)
 }
 
 #ifdef SOFIA_ISUP
+SWITCH_STANDARD_APP(sofia_isup_copy_function)
+{
+	void *isup_payload, *n_isup_payload;
+	size_t isup_payload_len;
+	switch_channel_t *channel, *isup_channel;
+	switch_core_session_t *isup_session = NULL;
+
+	if (zstr(data)) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Usage: <uuid>\n");
+		return;
+	}
+
+	if (!switch_core_session_check_interface(session, sofia_endpoint_interface)) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "You can only execute this app on a sofia session\n");
+		return;
+	}
+
+	if (!(isup_session = switch_core_session_locate((char *)data))) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "isup: session %s not found\n", data);
+		return;
+	}
+
+	if (isup_session == session) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "isup: %s (cannot copy my own isup info)\n", (char *) data);
+		goto done;
+	}
+
+	if (!switch_core_session_check_interface(isup_session, sofia_endpoint_interface)) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "isup: %s (uuid is not a sofia session)\n", (char *) data);
+		goto done;
+	}
+
+	isup_channel = switch_core_session_get_channel(isup_session);
+	isup_payload = switch_channel_get_private(isup_channel, SOFIA_ISUP_PAYLOAD_PVT);
+	if (!isup_payload) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "isup: %s (no isup data found)\n", (char *) data);
+		goto done;
+	}
+
+	isup_payload_len = (size_t)(unsigned long)switch_channel_get_private(isup_channel, SOFIA_ISUP_PAYLOAD_LEN_PVT);
+	n_isup_payload = switch_core_session_alloc(session, isup_payload_len);
+	memcpy(n_isup_payload, isup_payload, isup_payload_len);
+
+	channel = switch_core_session_get_channel(session);
+	switch_channel_set_variable(channel, "sip_isup_iam_calling_number", switch_channel_get_variable(isup_channel, "sip_isup_iam_calling_number"));
+	switch_channel_set_variable(channel, "sip_isup_iam_calling_party_category", switch_channel_get_variable(isup_channel, "sip_isup_iam_calling_party_category"));
+	switch_channel_set_variable(channel, "sip_isup_iam_called_number", switch_channel_get_variable(isup_channel, "sip_isup_iam_called_number"));
+	switch_channel_set_private(channel, SOFIA_ISUP_PAYLOAD_PVT, n_isup_payload);
+	switch_channel_set_private(channel, SOFIA_ISUP_PAYLOAD_LEN_PVT, (void *)(unsigned long)isup_payload_len);
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "[isup] Copied isup payload of len %zd from %s\n",
+		isup_payload_len, data);
+
+done:
+	switch_core_session_rwunlock(isup_session);
+}
+
 static sng_decoder_event_interface_t sng_event;
 static void handle_isup_tapping_log(uint8_t level, char *fmt, ...)
 {
@@ -6061,7 +6117,10 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_sofia_load)
 
 	SWITCH_ADD_APP(app_interface, "sofia_sla", "private sofia sla function",
 				   "private sofia sla function", sofia_sla_function, "<uuid>", SAF_NONE);
-
+#ifdef SOFIA_ISUP
+	SWITCH_ADD_APP(app_interface, "sofia_isup_copy", "copy isup data from another uuid",
+				   "copy isup data from another uuid", sofia_isup_copy_function, "<uuid>", SAF_NONE);
+#endif
 
 	SWITCH_ADD_API(api_interface, "sofia", "Sofia Controls", sofia_function, "<cmd> <args>");
 	SWITCH_ADD_API(api_interface, "sofia_gateway_data", "Get data from a sofia gateway", sofia_gateway_data_function, "<gateway_name> [ivar|ovar|var] <name>");

@@ -42,7 +42,7 @@
 #include "mod_sofia.h"
 
 #ifdef SOFIA_ISUP
-#include <sng_decoder.h>
+#include <sng_decoder/sng_decoder.h>
 #endif
 
 extern su_log_t tport_log[];
