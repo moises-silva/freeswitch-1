@@ -56,7 +56,7 @@ extern "C" {
 #include "pa_ringbuffer.h"
 
 /*! Maximum number of channels per stream */
-#define MAX_IO_CHANNELS 2
+#define MAX_IO_CHANNELS 128
 
 /*! Maximum numer of milliseconds per packet */
 #define MAX_IO_MS 100
