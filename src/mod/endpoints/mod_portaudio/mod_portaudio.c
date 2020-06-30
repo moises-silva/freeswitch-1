@@ -40,6 +40,15 @@
 #include <string.h>
 #include "pablio.h"
 
+#ifdef _WIN32
+// FIXME: Shall we make this configurable or detect when the underlying driver requires it?
+#define PA_COM_INIT
+#include "pa_win_coinitialize.h"
+// we can remove this after is all debugged, they must match internal values in pa_win_coinitialize.c
+#define PAWINUTIL_COM_INITIALIZED       (0xb38f)
+#define PAWINUTIL_COM_NOT_INITIALIZED   (0xf1cd)
+#endif
+
 #define MY_EVENT_RINGING "portaudio::ringing"
 #define MY_EVENT_MAKE_CALL "portaudio::makecall"
 #define MY_EVENT_CALL_HELD "portaudio::callheld"
@@ -169,6 +178,9 @@ struct private_object {
 	unsigned char holdbuf[SWITCH_RECOMMENDED_BUFFER_SIZE];
 	audio_endpoint_t *audio_endpoint;
 	struct private_object *next;
+#ifdef PA_COM_INIT
+	PaWinUtilComInitializationResult comres;
+#endif
 };
 
 
@@ -275,6 +287,34 @@ static int get_dev_by_name(char *name, int in);
 static int get_dev_by_number(char *numstr, int in);
 SWITCH_STANDARD_API(pa_cmd);
 
+
+#ifdef PA_COM_INIT
+static void pa_com_init(switch_core_session_t *session, PaWinUtilComInitializationResult *res)
+{
+	PaError err;
+	err = PaWinUtil_CoInitialize(paASIO, res);
+	if (err != paNoError) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "ASIO init failed: %d\n", err);
+		return;
+	}
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "ASIO init done\n");
+}
+
+static void pa_com_uninit(switch_core_session_t *session, PaWinUtilComInitializationResult *res)
+{
+	DWORD currentThreadId = GetCurrentThreadId();
+	if (res->state != PAWINUTIL_COM_INITIALIZED) {
+		return;
+	}
+	if (res->initializingThreadId != currentThreadId) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "ASIO uninit thread does not match!\n");
+		return;
+	}
+	PaWinUtil_CoUninitialize(paASIO, res);
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "ASIO uninit done\n");
+}
+#endif
+
 /*
    State methods they get called when the state changes to the specific state
    returning SWITCH_STATUS_SUCCESS tells the core to execute the standard state method next
@@ -289,6 +329,13 @@ static switch_status_t channel_on_init(switch_core_session_t *session)
 			switch_channel_set_flag(channel, CF_AUDIO);
 		}
 	}
+
+#ifdef PA_COM_INIT
+	{
+		private_t *tech_pvt = switch_core_session_get_private(session);
+		pa_com_init(session, &tech_pvt->comres);
+	}
+#endif
 
 	return SWITCH_STATUS_SUCCESS;
 }
@@ -750,6 +797,12 @@ static switch_status_t channel_on_destroy(switch_core_session_t *session)
 {
 	//private_t *tech_pvt = switch_core_session_get_private(session);
 	//switch_assert(tech_pvt != NULL);
+#ifdef PA_COM_INIT
+	{
+		private_t *tech_pvt = switch_core_session_get_private(session);
+		pa_com_uninit(session, &tech_pvt->comres);
+	}
+#endif
 	return SWITCH_STATUS_SUCCESS;
 }
 
@@ -1158,6 +1211,9 @@ static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *sessi
 	audio_endpoint_t *endpoint = NULL;
 	char *endpoint_name = NULL;
 	const char *endpoint_answer = NULL;
+#ifdef PA_COM_INIT
+	PaWinUtilComInitializationResult comres = { 0 };
+#endif
 
 	if (!outbound_profile) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Missing caller profile\n");
@@ -1180,6 +1236,10 @@ static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *sessi
 		switch_core_session_destroy(new_session);
 		return retcause;
 	}
+
+#ifdef PA_COM_INIT
+	pa_com_init(*new_session, &comres);
+#endif
 
 	if (outbound_profile->destination_number && !strncasecmp(outbound_profile->destination_number, "endpoint", sizeof("endpoint")-1)) {
 		endpoint = NULL;
@@ -1297,6 +1357,9 @@ error:
 		switch_mutex_unlock(endpoint->mutex);
 	}
 	if (new_session && *new_session) {
+#ifdef PA_COM_INIT
+		pa_com_uninit(*new_session, &comres);
+#endif
 		switch_core_session_destroy(new_session);
 	}
 	return retcause;
@@ -1309,7 +1372,6 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_portaudio_load)
 	switch_api_interface_t *api_interface;
 
 	module_pool = pool;
-
 	if (paNoError != Pa_Initialize()) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Cannot initialize port audio!\n");
 		return SWITCH_STATUS_TERM;
@@ -2963,6 +3025,9 @@ static switch_status_t place_call(char **argv, int argc, switch_stream_handle_t 
 {
 	switch_core_session_t *session;
 	switch_status_t status = SWITCH_STATUS_SUCCESS;
+#ifdef PA_COM_INIT
+	PaWinUtilComInitializationResult comres = { 0 };
+#endif
 	char *dest = NULL;
 
 	if (zstr(argv[0])) {
@@ -3025,6 +3090,9 @@ static switch_status_t place_call(char **argv, int argc, switch_stream_handle_t 
 			switch_channel_set_caller_profile(channel, tech_pvt->caller_profile);
 		}
 		tech_pvt->session = session;
+#ifdef PA_COM_INIT
+		pa_com_init(session, &comres);
+#endif
 		if ((status = validate_main_audio_stream()) == SWITCH_STATUS_SUCCESS) {
 			switch_set_flag_locked(tech_pvt, TFLAG_ANSWER);
 			switch_channel_mark_answered(channel);
@@ -3065,7 +3133,11 @@ static switch_status_t place_call(char **argv, int argc, switch_stream_handle_t 
 				switch_event_fire(&event);
 			}
 		}
+#ifdef PA_COM_INIT
+		pa_com_init(session, &comres);
+#endif
 	}
+
 
 	return SWITCH_STATUS_SUCCESS;
 }
