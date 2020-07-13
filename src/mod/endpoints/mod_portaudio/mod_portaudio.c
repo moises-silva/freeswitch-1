@@ -934,7 +934,7 @@ static void update_level(private_t *tech_pvt, switch_frame_t *frame, uint8_t rx)
 	int16_t *pcm = frame->data;
 	float level = rx ? tech_pvt->average_level_rx : tech_pvt->average_level_tx;
 	uint32_t scount = rx ? tech_pvt->scount_rx : tech_pvt->scount_tx;
-	if (switch_false(globals.level_report)) {
+	if (globals.level_report == SWITCH_FALSE) {
 		return;
 	}
 	if (tech_pvt->new_value_weight == 0.0) {
