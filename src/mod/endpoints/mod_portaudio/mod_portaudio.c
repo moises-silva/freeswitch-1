@@ -181,6 +181,12 @@ struct private_object {
 #ifdef PA_COM_INIT
 	PaWinUtilComInitializationResult comres;
 #endif
+	float average_level_rx;
+	float average_level_tx;
+	float new_value_weight;
+	float old_value_weight;
+	uint32_t scount_rx;
+	uint32_t scount_tx;
 };
 
 
@@ -306,6 +312,7 @@ static void pa_com_uninit(switch_core_session_t *session, PaWinUtilComInitializa
 	if (res->state != PAWINUTIL_COM_INITIALIZED) {
 		return;
 	}
+	// This is throwing a warning now due to sign mismatch, did this change recently in portaudio?
 	if (res->initializingThreadId != currentThreadId) {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "ASIO uninit thread does not match!\n");
 		return;
@@ -919,6 +926,52 @@ static switch_status_t channel_endpoint_read(audio_endpoint_t *endpoint, switch_
 	return SWITCH_STATUS_SUCCESS;
 }
 
+static void update_level(private_t *tech_pvt, switch_frame_t *frame, uint8_t rx)
+{
+	uint32_t i;
+	int16_t *pcm = frame->data;
+	float level = rx ? tech_pvt->average_level_rx : tech_pvt->average_level_tx;
+	uint32_t scount = rx ? tech_pvt->scount_rx : tech_pvt->scount_tx;
+	if (tech_pvt->new_value_weight == 0.0) {
+		// Have to adjust this if we decide on a different avg window
+		float window = 1000.0; // window in ms
+		tech_pvt->new_value_weight = 1.0f / ((float)frame->rate * (window / 1000.0f));
+		tech_pvt->old_value_weight = 1.0f - tech_pvt->new_value_weight;
+	}
+	// calculate signal level
+	for (i = 0; i < frame->samples; i++, scount++) {
+		level = (abs(pcm[i]) * tech_pvt->new_value_weight) + (level * tech_pvt->old_value_weight);
+	}
+	if (rx) {
+		tech_pvt->average_level_rx = level;
+	} else {
+		tech_pvt->average_level_tx = level;
+	}
+	// Fire an event when hitting the per-second rate
+	// we only fire a single event for both rx/tx and do it on the rx cycle for simplicity
+	if (scount >= frame->rate) {
+		scount = 0;
+		if (rx) {
+			switch_event_t *event;
+			if (switch_event_create_subclass(&event, SWITCH_EVENT_CUSTOM, MY_EVENT_RINGING) == SWITCH_STATUS_SUCCESS) {
+				double rxdb;
+				double txdb;
+				rxdb = tech_pvt->average_level_rx > 0.0 ? 20 * log10(tech_pvt->average_level_rx / (float)SWITCH_SMAX) : -90;
+				txdb = tech_pvt->average_level_tx > 0.0 ? 20 * log10(tech_pvt->average_level_tx / (float)SWITCH_SMAX) : -90;
+				switch_event_add_header(event, SWITCH_STACK_BOTTOM, "rx-level", "%.2f", rxdb);
+				switch_event_add_header(event, SWITCH_STACK_BOTTOM, "tx-level", "%.2f", txdb);
+				switch_channel_event_set_data(switch_core_session_get_channel(tech_pvt->session), event);
+				switch_event_fire(&event);
+			}
+		}
+	}
+	if (rx) {
+		tech_pvt->scount_rx = scount;
+	} else {
+		tech_pvt->scount_tx = scount;
+	}
+}
+
 static switch_status_t channel_read_frame(switch_core_session_t *session, switch_frame_t **frame, switch_io_flag_t flags, int stream_id)
 {
 	private_t *tech_pvt = switch_core_session_get_private(session);
@@ -926,8 +979,11 @@ static switch_status_t channel_read_frame(switch_core_session_t *session, switch
 	switch_status_t status = SWITCH_STATUS_FALSE;
 	switch_assert(tech_pvt != NULL);
 
+	*frame = NULL;
+
 	if (tech_pvt->audio_endpoint) {
-		return channel_endpoint_read(tech_pvt->audio_endpoint, frame);
+		status = channel_endpoint_read(tech_pvt->audio_endpoint, frame);
+		goto normal_return;
 	}
 
 	if (!globals.main_stream) {
@@ -1010,6 +1066,9 @@ static switch_status_t channel_read_frame(switch_core_session_t *session, switch
 	}
 
 normal_return:
+	if (*frame) {
+		update_level(tech_pvt, *frame, 1);
+	}
 	return status;
 
   cng_nowait:
@@ -1049,6 +1108,8 @@ static switch_status_t channel_write_frame(switch_core_session_t *session, switc
 	switch_status_t status = SWITCH_STATUS_FALSE;
 	private_t *tech_pvt = switch_core_session_get_private(session);
 	switch_assert(tech_pvt != NULL);
+
+	update_level(tech_pvt, frame, 0);
 
 	if (tech_pvt->audio_endpoint) {
 		return channel_endpoint_write(tech_pvt->audio_endpoint, frame);
