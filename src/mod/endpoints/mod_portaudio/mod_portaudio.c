@@ -53,6 +53,7 @@
 #define MY_EVENT_MAKE_CALL "portaudio::makecall"
 #define MY_EVENT_CALL_HELD "portaudio::callheld"
 #define MY_EVENT_CALL_RESUMED "portaudio::callresumed"
+#define MY_EVENT_CALL_AUDIO_LEVEL "portaudio::call_audio_level"
 #define MY_EVENT_ERROR_AUDIO_DEV "portaudio::audio_dev_error"
 #define SWITCH_PA_CALL_ID_VARIABLE "pa_call_id"
 
@@ -240,6 +241,7 @@ static struct {
 	int codecs_inited;
 	int stream_in_use; //only really used by playdev
 	int destroying_streams;
+	int level_report;
 } globals;
 
 
@@ -932,6 +934,9 @@ static void update_level(private_t *tech_pvt, switch_frame_t *frame, uint8_t rx)
 	int16_t *pcm = frame->data;
 	float level = rx ? tech_pvt->average_level_rx : tech_pvt->average_level_tx;
 	uint32_t scount = rx ? tech_pvt->scount_rx : tech_pvt->scount_tx;
+	if (switch_false(globals.level_report)) {
+		return;
+	}
 	if (tech_pvt->new_value_weight == 0.0) {
 		// Have to adjust this if we decide on a different avg window
 		float window = 1000.0; // window in ms
@@ -953,7 +958,7 @@ static void update_level(private_t *tech_pvt, switch_frame_t *frame, uint8_t rx)
 		scount = 0;
 		if (rx) {
 			switch_event_t *event;
-			if (switch_event_create_subclass(&event, SWITCH_EVENT_CUSTOM, MY_EVENT_RINGING) == SWITCH_STATUS_SUCCESS) {
+			if (switch_event_create_subclass(&event, SWITCH_EVENT_CUSTOM, MY_EVENT_CALL_AUDIO_LEVEL) == SWITCH_STATUS_SUCCESS) {
 				double rxdb;
 				double txdb;
 				rxdb = tech_pvt->average_level_rx > 0.0 ? 20 * log10(tech_pvt->average_level_rx / (float)SWITCH_SMAX) : -90;
@@ -1861,6 +1866,8 @@ static switch_status_t load_config(void)
 				}
 			} else if (!strcasecmp(var, "unload-on-device-fail")) {
 				globals.unload_device_fail = switch_true(val);
+			} else if (!strcmp(var, "level-report")) {
+				globals.level_report = switch_true(val);
 			}
 		}
 	}
