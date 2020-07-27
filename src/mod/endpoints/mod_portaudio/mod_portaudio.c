@@ -930,18 +930,12 @@ static switch_status_t channel_endpoint_read(audio_endpoint_t *endpoint, switch_
 
 static void update_level(private_t *tech_pvt, switch_frame_t *frame, uint8_t rx)
 {
-	uint32_t i;
+	uint32_t i, samples;
 	int16_t *pcm = frame->data;
 	float level = rx ? tech_pvt->average_level_rx : tech_pvt->average_level_tx;
 	uint32_t scount = rx ? tech_pvt->scount_rx : tech_pvt->scount_tx;
 	if (globals.level_report == SWITCH_FALSE) {
 		return;
-	}
-	if (tech_pvt->new_value_weight == 0.0) {
-		// Have to adjust this if we decide on a different avg window
-		float window = 1000.0; // window in ms
-		tech_pvt->new_value_weight = 1.0f / ((float)frame->rate * (window / 1000.0f));
-		tech_pvt->old_value_weight = 1.0f - tech_pvt->new_value_weight;
 	}
 	// calculate signal level
 	for (i = 0; i < frame->samples; i++, scount++) {
@@ -954,21 +948,39 @@ static void update_level(private_t *tech_pvt, switch_frame_t *frame, uint8_t rx)
 	}
 	// Fire an event when hitting the per-second rate
 	// we only fire a single event for both rx/tx and do it on the rx cycle for simplicity
-	if (scount >= frame->rate) {
-		scount = 0;
+	samples = tech_pvt->audio_endpoint ?
+		tech_pvt->audio_endpoint->read_codec.implementation->actual_samples_per_second :
+		globals.read_codec.implementation->actual_samples_per_second;
+	if (scount >= samples) {
 		if (rx) {
 			switch_event_t *event;
 			if (switch_event_create_subclass(&event, SWITCH_EVENT_CUSTOM, MY_EVENT_CALL_AUDIO_LEVEL) == SWITCH_STATUS_SUCCESS) {
 				double rxdb;
 				double txdb;
-				rxdb = tech_pvt->average_level_rx > 0.0 ? 20 * log10(tech_pvt->average_level_rx / (float)SWITCH_SMAX) : -90;
-				txdb = tech_pvt->average_level_tx > 0.0 ? 20 * log10(tech_pvt->average_level_tx / (float)SWITCH_SMAX) : -90;
+				float avg_rx;
+				float avg_tx;
+
+				switch_mutex_t *mutex = &tech_pvt->audio_endpoint ? tech_pvt->audio_endpoint->mutex : globals.pvt_lock;
+
+				switch_mutex_lock(mutex);
+				avg_rx = tech_pvt->average_level_rx;
+				avg_tx = tech_pvt->average_level_tx;
+				switch_mutex_unlock(mutex);
+
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(tech_pvt->session),
+						SWITCH_LOG_DEBUG, "firing level event at scount=%u with rate %u rx=%f tx=%f\n", scount, samples,
+						avg_rx,
+						avg_tx);
+
+				rxdb = avg_rx > 0.0 ? 20 * log10(tech_pvt->average_level_rx / (float)SWITCH_SMAX) : -90;
+				txdb = avg_tx > 0.0 ? 20 * log10(tech_pvt->average_level_tx / (float)SWITCH_SMAX) : -90;
 				switch_event_add_header(event, SWITCH_STACK_BOTTOM, "rx-level", "%.2f", rxdb);
 				switch_event_add_header(event, SWITCH_STACK_BOTTOM, "tx-level", "%.2f", txdb);
 				switch_channel_event_set_data(switch_core_session_get_channel(tech_pvt->session), event);
 				switch_event_fire(&event);
 			}
 		}
+		scount = 0;
 	}
 	if (rx) {
 		tech_pvt->scount_rx = scount;
@@ -1257,6 +1269,18 @@ static int release_stream_channel(shared_audio_stream_t *stream, int index, int 
 	return rc;
 }
 
+static void init_pvt_level(private_t *tech_pvt)
+{
+	// Init audio level weight factors
+	// FIXME: Have to adjust this if we decide on a different avg window
+	float window = 1000.0f; // window in ms
+	uint32_t samples = tech_pvt->audio_endpoint ?
+		tech_pvt->audio_endpoint->read_codec.implementation->actual_samples_per_second :
+		globals.read_codec.implementation->actual_samples_per_second;
+	tech_pvt->new_value_weight = 1.0f / ((float)samples * (window / 1000.0f));
+	tech_pvt->old_value_weight = 1.0f - tech_pvt->new_value_weight;
+}
+
 /* Make sure when you have 2 sessions in the same scope that you pass the appropriate one to the routines
    that allocate memory or you will have 1 channel with memory allocated from another channel's pool!
 */
@@ -1402,6 +1426,7 @@ static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *sessi
 	switch_set_flag_locked(tech_pvt, TFLAG_OUTBOUND);
 	switch_channel_set_state(channel, CS_INIT);
 	switch_channel_set_flag(channel, CF_AUDIO);
+	init_pvt_level(tech_pvt);
 	return SWITCH_CAUSE_SUCCESS;
 
 error:
@@ -3117,6 +3142,7 @@ static switch_status_t place_call(char **argv, int argc, switch_stream_handle_t 
 		if ((tech_pvt = (private_t *) switch_core_session_alloc(session, sizeof(private_t))) != 0) {
 			memset(tech_pvt, 0, sizeof(*tech_pvt));
 			switch_mutex_init(&tech_pvt->flag_mutex, SWITCH_MUTEX_NESTED, switch_core_session_get_pool(session));
+			init_pvt_level(tech_pvt);
 			channel = switch_core_session_get_channel(session);
 			switch_core_session_set_private(session, tech_pvt);
 			tech_pvt->session = session;
