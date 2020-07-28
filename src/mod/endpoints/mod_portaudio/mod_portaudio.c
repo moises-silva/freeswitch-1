@@ -960,7 +960,7 @@ static void update_level(private_t *tech_pvt, switch_frame_t *frame, uint8_t rx)
 				float avg_rx;
 				float avg_tx;
 
-				switch_mutex_t *mutex = &tech_pvt->audio_endpoint ? tech_pvt->audio_endpoint->mutex : globals.pvt_lock;
+				switch_mutex_t *mutex = tech_pvt->audio_endpoint ? tech_pvt->audio_endpoint->mutex : globals.pvt_lock;
 
 				switch_mutex_lock(mutex);
 				avg_rx = tech_pvt->average_level_rx;
