@@ -64,15 +64,21 @@ typedef struct oreka_session_s {
 	uint16_t sip_server_port;
 	switch_sockaddr_t *sip_server_addr;
 	switch_socket_t *sip_socket;
+	switch_sockaddr_t *local_addr;
+	uint16_t local_port;
+	char local_ipv4_str[256];
 } oreka_session_t;
 
 static struct {
+	char local_guessed_ipv4_str[256];
 	char local_ipv4_str[256];
 	char sip_server_addr_str[256];
 	char sip_server_ipv4_str[256];
 	uint16_t sip_server_port;
 	switch_sockaddr_t *sip_server_addr;
 	switch_socket_t *sip_socket;
+	switch_sockaddr_t *local_addr;
+	uint16_t local_port;
 	pid_t our_pid;
 	uint8_t mux_streams;
 	uint8_t native_streams;
@@ -94,8 +100,9 @@ static int oreka_write_udp(oreka_session_t *oreka, switch_stream_handle_t *udp)
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(oreka->session), SWITCH_LOG_DEBUG, "Oreka SIP Packet:\n%s", (const char *)udp->data);
 	switch_socket_sendto(oreka->sip_socket, oreka->sip_server_addr, 0, (void *)udp->data, &udplen);
 	if (udplen != udp->data_len) {
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(oreka->session), SWITCH_LOG_ERROR, "Failed to write SIP Packet of len %zd (wrote=%zd)",
-				udp->data_len, udplen);
+		char errbuf[255];
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(oreka->session), SWITCH_LOG_ERROR,
+				"Failed to write SIP Packet of len %zd (wrote=%zd): %s\n", udp->data_len, udplen, switch_strerror_r(errno, errbuf, sizeof(errbuf)));
 	}
 	return 0;
 }
@@ -103,12 +110,12 @@ static int oreka_write_udp(oreka_session_t *oreka, switch_stream_handle_t *udp)
 static int oreka_tear_down_rtp(oreka_session_t *oreka, oreka_stream_type_t type)
 {
 	if (type == FS_OREKA_READ && oreka->read_rtp_stream) {
-		switch_rtp_release_port(globals.local_ipv4_str, oreka->read_rtp_port);
+		switch_rtp_release_port(oreka->local_ipv4_str, oreka->read_rtp_port);
 		switch_rtp_destroy(&oreka->read_rtp_stream);
 		oreka->read_rtp_port = 0;
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(oreka->session), SWITCH_LOG_DEBUG, "Destroyed read rtp\n");
 	} else if (oreka->write_rtp_stream) {
-		switch_rtp_release_port(globals.local_ipv4_str, oreka->write_rtp_port);
+		switch_rtp_release_port(oreka->local_ipv4_str, oreka->write_rtp_port);
 		switch_rtp_destroy(&oreka->write_rtp_stream);
 		oreka->write_rtp_port = 0;
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(oreka->session), SWITCH_LOG_DEBUG, "Destroyed write rtp\n");
@@ -142,14 +149,14 @@ static int oreka_setup_rtp(oreka_session_t *oreka, oreka_stream_type_t type)
 		goto done;
 	}
 
-	if (!(rtp_port = switch_rtp_request_port(globals.local_ipv4_str))) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to allocate %s RTP port for IP %s\n", type_str, globals.local_ipv4_str);
+	if (!(rtp_port = switch_rtp_request_port(oreka->local_ipv4_str))) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to allocate %s RTP port for IP %s\n", type_str, oreka->local_ipv4_str);
 		res = -1;
 		goto done;
 	}
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Allocated %s port %d for local IP %s, destination IP %s\n", type_str,
-			rtp_port, globals.local_ipv4_str, oreka->sip_server_ipv4_str);
-	rtp_stream = switch_rtp_new(globals.local_ipv4_str, rtp_port,
+			rtp_port, oreka->local_ipv4_str, oreka->sip_server_ipv4_str);
+	rtp_stream = switch_rtp_new(oreka->local_ipv4_str, rtp_port,
 			oreka->sip_server_ipv4_str, rtp_port,
 			oreka->native_streams ? codec_impl->ianacode : 0, /* Native vs PCMU IANA */
 			codec_impl->samples_per_packet,
@@ -157,7 +164,7 @@ static int oreka_setup_rtp(oreka_session_t *oreka, oreka_stream_type_t type)
 			flags, NULL, &err, switch_core_session_get_pool(oreka->session));
 	if (!rtp_stream) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to create %s RTP stream at %s:%d: %s\n",
-				type_str, globals.local_ipv4_str, rtp_port, err);
+				type_str, oreka->local_ipv4_str, rtp_port, err);
 		res = -1;
 		goto done;
 	}
@@ -167,7 +174,7 @@ static int oreka_setup_rtp(oreka_session_t *oreka, oreka_stream_type_t type)
 done:
 	if (res == -1) {
 		if (rtp_port) {
-			switch_rtp_release_port(globals.local_ipv4_str, rtp_port);
+			switch_rtp_release_port(oreka->local_ipv4_str, rtp_port);
 		}
 		if (rtp_stream) {
 			switch_rtp_destroy(&rtp_stream);
@@ -182,7 +189,7 @@ done:
 		}
 	}
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Successfully created %s RTP stream at %s:%d at %dms@%dHz\n",
-				type_str, globals.local_ipv4_str, rtp_port, codec_impl->microseconds_per_packet/1000, codec_impl->samples_per_second);
+				type_str, oreka->local_ipv4_str, rtp_port, codec_impl->microseconds_per_packet/1000, codec_impl->samples_per_second);
 	return res;
 }
 
@@ -328,7 +335,7 @@ static int oreka_send_sip_message(oreka_session_t *oreka, oreka_recording_status
 		rtp_payload = oreka->native_streams ? codec_impl->ianacode : 0;
 		iananame = oreka->native_streams ? codec_impl->iananame : "PCMU";
 		sdp.write_function(&sdp, "v=0\r\n");
-		sdp.write_function(&sdp, "o=freeswitch %s 1 IN IP4 %s\r\n", session_uuid, globals.local_ipv4_str);
+		sdp.write_function(&sdp, "o=freeswitch %s 1 IN IP4 %s\r\n", session_uuid, globals.local_guessed_ipv4_str);
 		sdp.write_function(&sdp, "c=IN IP4 %s\r\n", oreka->sip_server_ipv4_str);
 		sdp.write_function(&sdp, "s=Phone Recording (%s)\r\n", direction);
 		sdp.write_function(&sdp, "i=FreeSWITCH Oreka Recorder (pid=%d)\r\n", globals.our_pid);
@@ -337,16 +344,16 @@ static int oreka_send_sip_message(oreka_session_t *oreka, oreka_recording_status
 	}
 
 	/* Request line */
-	sip_header.write_function(&sip_header, "%s sip:%s@%s:5060 SIP/2.0\r\n", method, callee_id_name, globals.local_ipv4_str);
+	sip_header.write_function(&sip_header, "%s sip:%s@%s:5060 SIP/2.0\r\n", method, callee_id_name, globals.local_guessed_ipv4_str);
 
 	/* Via */
-	sip_header.write_function(&sip_header, "Via: SIP/2.0/UDP %s:5061;branch=z9hG4bK-%s\r\n", globals.local_ipv4_str, session_uuid);
+	sip_header.write_function(&sip_header, "Via: SIP/2.0/UDP %s:5061;branch=z9hG4bK-%s\r\n", globals.local_guessed_ipv4_str, session_uuid);
 
 	/* From */
-	sip_header.write_function(&sip_header, "From: <sip:%s@%s:5061;tag=1>\r\n", caller_id_number, globals.local_ipv4_str);
+	sip_header.write_function(&sip_header, "From: <sip:%s@%s:5061;tag=1>\r\n", caller_id_number, globals.local_guessed_ipv4_str);
 
 	/* To */
-	sip_header.write_function(&sip_header, "To: <sip:%s@%s:5060>\r\n", callee_id_number, globals.local_ipv4_str);
+	sip_header.write_function(&sip_header, "To: <sip:%s@%s:5060>\r\n", callee_id_number, globals.local_guessed_ipv4_str);
 
 	/* Call-ID */
 	sip_header.write_function(&sip_header, "Call-ID: %s\r\n", session_uuid);
@@ -355,7 +362,7 @@ static int oreka_send_sip_message(oreka_session_t *oreka, oreka_recording_status
 	sip_header.write_function(&sip_header, "CSeq: 1 %s\r\n", method);
 
 	/* Contact */
-	sip_header.write_function(&sip_header, "Contact: sip:freeswitch@%s:5061\r\n", globals.local_ipv4_str);
+	sip_header.write_function(&sip_header, "Contact: sip:freeswitch@%s:5061\r\n", globals.local_guessed_ipv4_str);
 
 	/* Max-Forwards */
 	sip_header.write_function(&sip_header, "Max-Forwards: 70\r\n", method);
@@ -423,6 +430,7 @@ static switch_bool_t oreka_audio_callback(switch_media_bug_t *bug, void *user_da
 	uint32_t linear_len = 0;
 	uint32_t i = 0;
 	int16_t *linear_samples = NULL;
+	char errbuf[255];
 
 	if (type == SWITCH_ABC_TYPE_READ_REPLACE || type == SWITCH_ABC_TYPE_WRITE_REPLACE || type == SWITCH_ABC_TYPE_READ_PING) {
 		int16_t *data;
@@ -568,7 +576,9 @@ static switch_bool_t oreka_audio_callback(switch_media_bug_t *bug, void *user_da
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Oreka wrote %u bytes! (read)\n", pcmu_frame.datalen);
 					}
 				} else {
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to write %u bytes! (read)\n", pcmu_frame.datalen);
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to write %u bytes! (read): %s\n",
+							pcmu_frame.datalen,
+							switch_strerror_r(errno, errbuf, sizeof(errbuf)));
 				}
 			}
 		}
@@ -582,7 +592,9 @@ static switch_bool_t oreka_audio_callback(switch_media_bug_t *bug, void *user_da
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Oreka wrote %u bytes! (write)\n", pcmu_frame.datalen);
 					}
 				} else {
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to write %u bytes! (write)\n", pcmu_frame.datalen);
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to write %u bytes! (write): %s\n",
+							pcmu_frame.datalen,
+							switch_strerror_r(errno, errbuf, sizeof(errbuf)));
 				}
 			}
 		}
@@ -597,7 +609,9 @@ static switch_bool_t oreka_audio_callback(switch_media_bug_t *bug, void *user_da
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Oreka wrote %u bytes! (write)\n", nframe->datalen);
 					}
 				} else {
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to write %u bytes! (write)\n", nframe->datalen);
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to write %u bytes! (write): %s\n",
+							nframe->datalen,
+							switch_strerror_r(errno, errbuf, sizeof(errbuf)));
 				}
 			}
 		}
@@ -612,7 +626,9 @@ static switch_bool_t oreka_audio_callback(switch_media_bug_t *bug, void *user_da
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Oreka wrote %u bytes! (write)\n", nframe->datalen);
 					}
 				} else {
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to write %u bytes! (write)\n", nframe->datalen);
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to write %u bytes! (write): %s\n",
+							nframe->datalen,
+							switch_strerror_r(errno, errbuf, sizeof(errbuf)));
 				}
 			}
 		}
@@ -652,6 +668,16 @@ SWITCH_STANDARD_APP(oreka_record_function)
 	switch_assert(oreka);
 	memset(oreka, 0, sizeof(*oreka));
 
+	// Set defaults from the global context
+	// channel variables may override some of these
+	snprintf(oreka->sip_server_addr_str, sizeof(oreka->sip_server_addr_str), "%s", globals.sip_server_addr_str);
+	snprintf(oreka->sip_server_ipv4_str, sizeof(oreka->sip_server_ipv4_str), "%s", globals.sip_server_ipv4_str);
+	oreka->sip_server_addr = globals.sip_server_addr; // addr where we send SIP messages to
+	oreka->sip_server_port = globals.sip_server_port; // port where we send SIP messages to
+	switch_copy_string(oreka->local_ipv4_str, globals.local_ipv4_str, sizeof(oreka->local_ipv4_str)); // local ip to send SIP/RTP from
+	oreka->local_port = globals.local_port; // local port to send SIP from
+	oreka->sip_socket = globals.sip_socket; // local socket used to send SIP
+
 	oreka->native_streams = globals.native_streams;
 	if ((var = switch_channel_get_variable(channel, "oreka_native_streams"))) {
 		oreka->native_streams = switch_true(var);
@@ -667,36 +693,46 @@ SWITCH_STANDARD_APP(oreka_record_function)
 		oreka->mux_streams = 0;
 	}
 
-	if ((var = switch_channel_get_variable(channel, "oreka_sip_port"))) {
-		oreka->sip_server_port = atoi(var);
-	} else {
-		oreka->sip_server_port = globals.sip_server_port;
-	}
-
 	pool = switch_core_session_get_pool(session);
+	// if a server was specified for this sesssion, override the
+	// sip server addr however we can still use the same local socket
 	if ((var = switch_channel_get_variable(channel, "oreka_sip_server"))) {
 		snprintf(oreka->sip_server_addr_str, sizeof(oreka->sip_server_addr_str), "%s", var);
+		if ((var = switch_channel_get_variable(channel, "oreka_sip_port"))) {
+			oreka->sip_server_port = atoi(var);
+		}
 		switch_sockaddr_info_get(&oreka->sip_server_addr, oreka->sip_server_addr_str, SWITCH_UNSPEC,
 								oreka->sip_server_port, 0, pool);
 		if (!oreka->sip_server_addr) {
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Invalid sip server address specified: %s!\n", var);
 			return;
 		}
+		switch_get_addr(oreka->sip_server_ipv4_str, sizeof(oreka->sip_server_ipv4_str), oreka->sip_server_addr);
+	}
 
+	// if a new local ip is specified, check if they also specified a port
+	// and build a new local sip socket bound to that address
+	if ((var = switch_channel_get_variable(channel, "oreka_local_ip"))) {
+		switch_copy_string(oreka->local_ipv4_str, var, sizeof(oreka->local_ipv4_str));
+		if ((var = switch_channel_get_variable(channel, "oreka_local_port"))) {
+			oreka->local_port = atoi(var);
+		}
+		switch_sockaddr_info_get(&oreka->local_addr, oreka->local_ipv4_str, SWITCH_UNSPEC, oreka->local_port, 0, pool);
+		if (!oreka->local_addr) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Invalid local server address specified: %s!\n", oreka->local_ipv4_str);
+			return;
+		}
 		if (switch_socket_create(&oreka->sip_socket, switch_sockaddr_get_family(oreka->sip_server_addr), SOCK_DGRAM, 0, pool) != SWITCH_STATUS_SUCCESS) {
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to create socket!\n");
 			return;
 		}
-		switch_get_addr(oreka->sip_server_ipv4_str, sizeof(oreka->sip_server_ipv4_str), oreka->sip_server_addr);
-	} else {
-		snprintf(oreka->sip_server_addr_str, sizeof(oreka->sip_server_addr_str), "%s", globals.sip_server_addr_str);
-		snprintf(oreka->sip_server_ipv4_str, sizeof(oreka->sip_server_ipv4_str), "%s", globals.sip_server_ipv4_str);
-		oreka->sip_server_addr = globals.sip_server_addr;
-		oreka->sip_socket = globals.sip_socket;
+		if (switch_socket_bind(oreka->sip_socket, oreka->local_addr)) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to bind sip socket to local addr: %s!\n", oreka->local_ipv4_str);
+			return;
+		}
 	}
 
 	oreka->session = session;
-
 	if (oreka->native_streams) {
 		flags = SMBF_TAP_NATIVE_READ | SMBF_TAP_NATIVE_WRITE | SMBF_ANSWER_REQ;
 	} else if (oreka->mux_streams) {
@@ -714,6 +750,10 @@ SWITCH_STANDARD_APP(oreka_record_function)
 	oreka->read_bug = bug;
 	oreka->usecnt = oreka->mux_streams ? 1 : 2;
 	switch_channel_set_private(channel, OREKA_PRIVATE, oreka);
+
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
+		"Created oreka session sip_server_addr=%s, sip_server_ipv4_str=%s, sip_server_port=%d, local_ip=%s\n",
+		oreka->sip_server_addr_str, oreka->sip_server_ipv4_str, oreka->sip_server_port, oreka->local_ipv4_str);
 }
 
 #define OREKA_XML_CONFIG "oreka.conf"
@@ -734,6 +774,10 @@ static int load_config(void)
 				snprintf(globals.sip_server_addr_str, sizeof(globals.sip_server_addr_str), "%s", val);
 			} else if (!strcasecmp(var, "sip-server-port")) {
 				globals.sip_server_port = atoi(val);
+			} else if (!strcasecmp(var, "local-ip")) {
+				snprintf(globals.local_ipv4_str, sizeof(globals.local_ipv4_str), "%s", val);
+			} else if (!strcasecmp(var, "local-port")) {
+				globals.local_port = atoi(val);
 			} else if (!strcasecmp(var, "mux-all-streams")) {
 				uint8_t enable = switch_true(val);
 				if (enable) {
@@ -796,13 +840,27 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_oreka_load)
 		return SWITCH_STATUS_UNLOAD;
 	}
 
-	switch_find_local_ip(globals.local_ipv4_str, sizeof(globals.local_ipv4_str), &mask, AF_INET);
+	switch_find_local_ip(globals.local_guessed_ipv4_str, sizeof(globals.local_guessed_ipv4_str), &mask, AF_INET);
+	if (zstr(globals.local_ipv4_str)) {
+		switch_copy_string(globals.local_ipv4_str, globals.local_guessed_ipv4_str, sizeof(globals.local_ipv4_str));
+	}
 	switch_get_addr(globals.sip_server_ipv4_str, sizeof(globals.sip_server_ipv4_str), globals.sip_server_addr);
-	globals.our_pid = getpid();
 
+	switch_sockaddr_info_get(&globals.local_addr, globals.local_ipv4_str, SWITCH_UNSPEC, globals.local_port, 0, pool);
+	if (!globals.local_addr) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Invalid local server address specified: %s!\n", globals.local_ipv4_str);
+		return SWITCH_STATUS_UNLOAD;
+	}
+
+	if (switch_socket_bind(globals.sip_socket, globals.local_addr)) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to bind sip socket to local addr: %s!\n", globals.local_ipv4_str);
+		return SWITCH_STATUS_UNLOAD;
+	}
+
+	globals.our_pid = getpid();
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
-		"Loading mod_oreka, sip_server_addr=%s, sip_server_ipv4_str=%s, sip_server_port=%d, local_ipv4_str=%s\n",
-		globals.sip_server_addr_str, globals.sip_server_ipv4_str, globals.sip_server_port, globals.local_ipv4_str);
+		"Loading mod_oreka, sip_server_addr=%s, sip_server_ipv4_str=%s, sip_server_port=%d, local_guessed_ipv4_str=%s, local_ip=%s\n",
+		globals.sip_server_addr_str, globals.sip_server_ipv4_str, globals.sip_server_port, globals.local_guessed_ipv4_str, globals.local_ipv4_str);
 
 	*module_interface = switch_loadable_module_create_module_interface(pool, modname);
 
