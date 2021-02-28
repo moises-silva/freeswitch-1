@@ -55,20 +55,27 @@ typedef struct oreka_session_s {
 	switch_event_t *invite_extra_headers;
 	switch_event_t *bye_extra_headers;
 	int usecnt;
-    switch_audio_resampler_t *read_resampler;
-    switch_audio_resampler_t *write_resampler;
-    int mux_streams;
+	switch_audio_resampler_t *read_resampler;
+	switch_audio_resampler_t *write_resampler;
+	uint8_t mux_streams;
+	uint8_t native_streams;
+	char sip_server_addr_str[256];
+	char sip_server_ipv4_str[256];
+	uint16_t sip_server_port;
+	switch_sockaddr_t *sip_server_addr;
+	switch_socket_t *sip_socket;
 } oreka_session_t;
 
 static struct {
 	char local_ipv4_str[256];
 	char sip_server_addr_str[256];
 	char sip_server_ipv4_str[256];
-	int sip_server_port;
+	uint16_t sip_server_port;
 	switch_sockaddr_t *sip_server_addr;
 	switch_socket_t *sip_socket;
 	pid_t our_pid;
-    int mux_streams;
+	uint8_t mux_streams;
+	uint8_t native_streams;
 } globals;
 
 typedef enum {
@@ -85,7 +92,7 @@ static int oreka_write_udp(oreka_session_t *oreka, switch_stream_handle_t *udp)
 {
 	switch_size_t udplen = udp->data_len;
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(oreka->session), SWITCH_LOG_DEBUG, "Oreka SIP Packet:\n%s", (const char *)udp->data);
-	switch_socket_sendto(globals.sip_socket, globals.sip_server_addr, 0, (void *)udp->data, &udplen);
+	switch_socket_sendto(oreka->sip_socket, oreka->sip_server_addr, 0, (void *)udp->data, &udplen);
 	if (udplen != udp->data_len) {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(oreka->session), SWITCH_LOG_ERROR, "Failed to write SIP Packet of len %zd (wrote=%zd)",
 				udp->data_len, udplen);
@@ -141,10 +148,10 @@ static int oreka_setup_rtp(oreka_session_t *oreka, oreka_stream_type_t type)
 		goto done;
 	}
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Allocated %s port %d for local IP %s, destination IP %s\n", type_str,
-			rtp_port, globals.local_ipv4_str, globals.sip_server_ipv4_str);
+			rtp_port, globals.local_ipv4_str, oreka->sip_server_ipv4_str);
 	rtp_stream = switch_rtp_new(globals.local_ipv4_str, rtp_port,
-			globals.sip_server_ipv4_str, rtp_port,
-			0, /* PCMU IANA*/
+			oreka->sip_server_ipv4_str, rtp_port,
+			oreka->native_streams ? codec_impl->ianacode : 0, /* Native vs PCMU IANA */
 			codec_impl->samples_per_packet,
 			codec_impl->microseconds_per_packet,
 			flags, NULL, &err, switch_core_session_get_pool(oreka->session));
@@ -156,7 +163,6 @@ static int oreka_setup_rtp(oreka_session_t *oreka, oreka_stream_type_t type)
 	}
 
     switch_rtp_intentional_bugs(rtp_stream, RTP_BUG_SEND_LINEAR_TIMESTAMPS);
-
 
 done:
 	if (res == -1) {
@@ -238,6 +244,9 @@ static void oreka_destroy(oreka_session_t *oreka)
 		if (oreka->bye_extra_headers) {
 			switch_event_destroy(&oreka->bye_extra_headers);
 		}
+		if (oreka->sip_socket != globals.sip_socket) {
+			switch_socket_close(oreka->sip_socket);
+		}
 		/* Actual memory for the oreka session was taken from the switch core session pool, the core will take care of it */
 	}
 }
@@ -302,14 +311,29 @@ static int oreka_send_sip_message(oreka_session_t *oreka, oreka_recording_status
 
 	/* Fill in the SDP first if this is the beginning */
 	if (status == FS_OREKA_START) {
+		switch_port_t rtp_port;
+		switch_payload_t rtp_payload;
+		switch_codec_implementation_t *codec_impl;
+		const char *iananame;
+		const char *direction;
+		if (type == FS_OREKA_READ) {
+			rtp_port = oreka->read_rtp_port;
+			codec_impl = &oreka->read_impl;
+			direction =  "RX";
+		} else {
+			rtp_port = oreka->write_rtp_port;
+			codec_impl = &oreka->write_impl;
+			direction = "TX";
+		}
+		rtp_payload = oreka->native_streams ? codec_impl->ianacode : 0;
+		iananame = oreka->native_streams ? codec_impl->iananame : "PCMU";
 		sdp.write_function(&sdp, "v=0\r\n");
 		sdp.write_function(&sdp, "o=freeswitch %s 1 IN IP4 %s\r\n", session_uuid, globals.local_ipv4_str);
-		sdp.write_function(&sdp, "c=IN IP4 %s\r\n", globals.sip_server_ipv4_str);
-		sdp.write_function(&sdp, "s=Phone Recording (%s)\r\n", type == FS_OREKA_READ ? "RX" : "TX");
+		sdp.write_function(&sdp, "c=IN IP4 %s\r\n", oreka->sip_server_ipv4_str);
+		sdp.write_function(&sdp, "s=Phone Recording (%s)\r\n", direction);
 		sdp.write_function(&sdp, "i=FreeSWITCH Oreka Recorder (pid=%d)\r\n", globals.our_pid);
-		sdp.write_function(&sdp, "m=audio %d RTP/AVP 0\r\n", type == FS_OREKA_READ ? oreka->read_rtp_port : oreka->write_rtp_port);
-		sdp.write_function(&sdp, "a=rtpmap:0 PCMU/%d\r\n", type == FS_OREKA_READ
-				? oreka->read_impl.samples_per_second : oreka->write_impl.samples_per_second);
+		sdp.write_function(&sdp, "m=audio %d RTP/AVP %d\r\n", rtp_port, rtp_payload);
+		sdp.write_function(&sdp, "a=rtpmap:%d %s/%d\r\n", rtp_payload, iananame, codec_impl->samples_per_second);
 	}
 
 	/* Request line */
@@ -392,62 +416,60 @@ static switch_bool_t oreka_audio_callback(switch_media_bug_t *bug, void *user_da
 	oreka_session_t *oreka = user_data;
 	switch_core_session_t *session = oreka->session;
 	switch_frame_t pcmu_frame = { 0 };
-    switch_frame_t *linear_frame, raw_frame = { 0 };
+	switch_frame_t *linear_frame, raw_frame = { 0 };
 	uint8_t pcmu_data[SWITCH_RECOMMENDED_BUFFER_SIZE];
 	uint8_t raw_data[SWITCH_RECOMMENDED_BUFFER_SIZE] = { 0 };
 	uint8_t resample_data[SWITCH_RECOMMENDED_BUFFER_SIZE];
-    uint32_t linear_len = 0;
+	uint32_t linear_len = 0;
 	uint32_t i = 0;
 	int16_t *linear_samples = NULL;
 
-
-
 	if (type == SWITCH_ABC_TYPE_READ_REPLACE || type == SWITCH_ABC_TYPE_WRITE_REPLACE || type == SWITCH_ABC_TYPE_READ_PING) {
-        int16_t *data;
+		int16_t *data;
 
-        if (type == SWITCH_ABC_TYPE_READ_REPLACE || type == SWITCH_ABC_TYPE_READ_PING) {
+		if (type == SWITCH_ABC_TYPE_READ_REPLACE || type == SWITCH_ABC_TYPE_READ_PING) {
 
-            if (type == SWITCH_ABC_TYPE_READ_REPLACE) {
-                linear_frame = switch_core_media_bug_get_read_replace_frame(bug);
-            } else {
-                switch_status_t status;
+			if (type == SWITCH_ABC_TYPE_READ_REPLACE) {
+				linear_frame = switch_core_media_bug_get_read_replace_frame(bug);
+			} else {
+				switch_status_t status;
 
-                raw_frame.data = raw_data;
-                raw_frame.buflen = SWITCH_RECOMMENDED_BUFFER_SIZE;
-                linear_frame = &raw_frame;
+				raw_frame.data = raw_data;
+				raw_frame.buflen = SWITCH_RECOMMENDED_BUFFER_SIZE;
+				linear_frame = &raw_frame;
 
-                status = switch_core_media_bug_read(bug, &raw_frame, SWITCH_FALSE);
-                if (status != SWITCH_STATUS_SUCCESS && status != SWITCH_STATUS_BREAK) {
-                    return SWITCH_TRUE;
-                }
-            }
+				status = switch_core_media_bug_read(bug, &raw_frame, SWITCH_FALSE);
+				if (status != SWITCH_STATUS_SUCCESS && status != SWITCH_STATUS_BREAK) {
+					return SWITCH_TRUE;
+				}
+			}
 
-            if (oreka->read_resampler) {
-                data = (int16_t *) linear_frame->data;
-                switch_resample_process(oreka->read_resampler, data, (int) linear_frame->datalen / 2);
-                linear_len = oreka->read_resampler->to_len * 2;
-                memcpy(resample_data, oreka->read_resampler->to, linear_len);
-                linear_samples = (int16_t *)resample_data;
-            } else {
-                linear_samples = linear_frame->data;
-                linear_len = linear_frame->datalen;
-            }
-        }
+			if (oreka->read_resampler) {
+				data = (int16_t *) linear_frame->data;
+				switch_resample_process(oreka->read_resampler, data, (int) linear_frame->datalen / 2);
+				linear_len = oreka->read_resampler->to_len * 2;
+				memcpy(resample_data, oreka->read_resampler->to, linear_len);
+				linear_samples = (int16_t *)resample_data;
+			} else {
+				linear_samples = linear_frame->data;
+				linear_len = linear_frame->datalen;
+			}
+		}
 
-        if (type == SWITCH_ABC_TYPE_WRITE_REPLACE) {
-            linear_frame = switch_core_media_bug_get_write_replace_frame(bug);
+		if (type == SWITCH_ABC_TYPE_WRITE_REPLACE) {
+			linear_frame = switch_core_media_bug_get_write_replace_frame(bug);
 
-            if (oreka->write_resampler) {
-                data = (int16_t *) linear_frame->data;
-                switch_resample_process(oreka->write_resampler, data, (int) linear_frame->datalen / 2);
-                linear_len = oreka->write_resampler->to_len * 2;
-                memcpy(resample_data, oreka->write_resampler->to, linear_len);
-                linear_samples = (int16_t *)resample_data;
-            } else {
-                linear_samples = linear_frame->data;
-                linear_len = linear_frame->datalen;
-            }
-        }
+			if (oreka->write_resampler) {
+				data = (int16_t *) linear_frame->data;
+				switch_resample_process(oreka->write_resampler, data, (int) linear_frame->datalen / 2);
+				linear_len = oreka->write_resampler->to_len * 2;
+				memcpy(resample_data, oreka->write_resampler->to, linear_len);
+				linear_samples = (int16_t *)resample_data;
+			} else {
+				linear_samples = linear_frame->data;
+				linear_len = linear_frame->datalen;
+			}
+		}
 
 		/* convert the L16 frame into PCMU */
 		memset(&pcmu_frame, 0, sizeof(pcmu_frame));
@@ -463,81 +485,77 @@ static switch_bool_t oreka_audio_callback(switch_media_bug_t *bug, void *user_da
 	switch (type) {
 	case SWITCH_ABC_TYPE_INIT:
 		{
-            switch_codec_implementation_t read_impl;
+			switch_codec_implementation_t read_impl;
 
-            switch_core_session_get_read_impl(session, &read_impl);
+			switch_core_session_get_read_impl(session, &read_impl);
 
-            if (read_impl.actual_samples_per_second != 8000) {
-                switch_resample_create(&oreka->read_resampler,
-                                       read_impl.actual_samples_per_second,
-                                       8000,
-                                       320, SWITCH_RESAMPLE_QUALITY, 1);
+			if (read_impl.actual_samples_per_second != 8000) {
+				switch_resample_create(&oreka->read_resampler,
+				                       read_impl.actual_samples_per_second,
+				                       8000,
+				                       320, SWITCH_RESAMPLE_QUALITY, 1);
 
                 switch_resample_create(&oreka->write_resampler,
-                                       read_impl.actual_samples_per_second,
-                                       8000,
-                                       320, SWITCH_RESAMPLE_QUALITY, 1);
+				                       read_impl.actual_samples_per_second,
+				                       8000,
+				                       320, SWITCH_RESAMPLE_QUALITY, 1);
             }
-
-
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Starting Oreka recording for audio stream\n");
 			oreka_send_sip_message(oreka, FS_OREKA_START, FS_OREKA_READ);
-            if (!oreka->mux_streams) {
-                oreka_send_sip_message(oreka, FS_OREKA_START, FS_OREKA_WRITE);
-            }
+			if (!oreka->mux_streams) {
+				oreka_send_sip_message(oreka, FS_OREKA_START, FS_OREKA_WRITE);
+			}
 		}
 		break;
 	case SWITCH_ABC_TYPE_CLOSE:
 		{
-            if (oreka->mux_streams) {
-                int16_t *data;
+			if (oreka->mux_streams) {
+				int16_t *data;
 
-                raw_frame.data = raw_data;
-                raw_frame.buflen = SWITCH_RECOMMENDED_BUFFER_SIZE;
-                linear_frame = &raw_frame;
+				raw_frame.data = raw_data;
+				raw_frame.buflen = SWITCH_RECOMMENDED_BUFFER_SIZE;
+				linear_frame = &raw_frame;
 
-                while (switch_core_media_bug_read(bug, &raw_frame, SWITCH_TRUE) == SWITCH_STATUS_SUCCESS) {
-                    linear_frame = &raw_frame;
+				while (switch_core_media_bug_read(bug, &raw_frame, SWITCH_TRUE) == SWITCH_STATUS_SUCCESS) {
+					linear_frame = &raw_frame;
 
+					if (oreka->read_resampler) {
+						data = (int16_t *) linear_frame->data;
+						switch_resample_process(oreka->read_resampler, data, (int) linear_frame->datalen / 2);
+						linear_len = oreka->read_resampler->to_len * 2;
+						memcpy(resample_data, oreka->read_resampler->to, linear_len);
+						linear_samples = (int16_t *)resample_data;
+					} else {
+						linear_samples = linear_frame->data;
+						linear_len = linear_frame->datalen;
+					}
 
-                    if (oreka->read_resampler) {
-                        data = (int16_t *) linear_frame->data;
-                        switch_resample_process(oreka->read_resampler, data, (int) linear_frame->datalen / 2);
-                        linear_len = oreka->read_resampler->to_len * 2;
-                        memcpy(resample_data, oreka->read_resampler->to, linear_len);
-                        linear_samples = (int16_t *)resample_data;
-                    } else {
-                        linear_samples = linear_frame->data;
-                        linear_len = linear_frame->datalen;
-                    }
+					memset(&pcmu_frame, 0, sizeof(pcmu_frame));
+					for (i = 0; i < linear_len / sizeof(int16_t); i++) {
+						pcmu_data[i] = linear_to_ulaw(linear_samples[i]);
+					}
+					pcmu_frame.source = __SWITCH_FUNC__;
+					pcmu_frame.data = pcmu_data;
+					pcmu_frame.datalen = i;
+					pcmu_frame.payload = 0;
 
-                    memset(&pcmu_frame, 0, sizeof(pcmu_frame));
-                    for (i = 0; i < linear_len / sizeof(int16_t); i++) {
-                        pcmu_data[i] = linear_to_ulaw(linear_samples[i]);
-                    }
-                    pcmu_frame.source = __SWITCH_FUNC__;
-                    pcmu_frame.data = pcmu_data;
-                    pcmu_frame.datalen = i;
-                    pcmu_frame.payload = 0;
+					switch_rtp_write_frame(oreka->read_rtp_stream, &pcmu_frame);
+				}
+			}
 
-                    switch_rtp_write_frame(oreka->read_rtp_stream, &pcmu_frame);
-                }
-            }
+			if (oreka->read_resampler) {
+				switch_resample_destroy(&oreka->read_resampler);
+			}
 
-
-            if (oreka->read_resampler) {
-                switch_resample_destroy(&oreka->read_resampler);
-            }
-
-            if (oreka->write_resampler) {
-                switch_resample_destroy(&oreka->write_resampler);
-            }
+			if (oreka->write_resampler) {
+				switch_resample_destroy(&oreka->write_resampler);
+			}
 
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Stopping Oreka recording for audio stream\n");
 			oreka_send_sip_message(oreka, FS_OREKA_STOP, FS_OREKA_READ);
-            if (!oreka->mux_streams) {
-                oreka_send_sip_message(oreka, FS_OREKA_STOP, FS_OREKA_WRITE);
-            }
+			if (!oreka->mux_streams) {
+				oreka_send_sip_message(oreka, FS_OREKA_STOP, FS_OREKA_WRITE);
+			}
 		}
 		break;
 	case SWITCH_ABC_TYPE_READ_REPLACE:
@@ -569,25 +587,52 @@ static switch_bool_t oreka_audio_callback(switch_media_bug_t *bug, void *user_da
 			}
 		}
         break;
+	case SWITCH_ABC_TYPE_TAP_NATIVE_READ:
+		{
+			switch_frame_t *nframe = switch_core_media_bug_get_native_read_frame(bug);
+			if (nframe->datalen) {
+				if (switch_rtp_write_frame(oreka->read_rtp_stream, nframe) > 0) {
+					oreka->read_cnt++;
+					if (oreka->read_cnt < 10) {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Oreka wrote %u bytes! (write)\n", nframe->datalen);
+					}
+				} else {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to write %u bytes! (write)\n", nframe->datalen);
+				}
+			}
+		}
+		break;
+	case SWITCH_ABC_TYPE_TAP_NATIVE_WRITE:
+		{
+			switch_frame_t *nframe = switch_core_media_bug_get_native_write_frame(bug);
+			if (nframe->datalen) {
+				if (switch_rtp_write_frame(oreka->write_rtp_stream, nframe) > 0) {
+					oreka->write_cnt++;
+					if (oreka->write_cnt < 10) {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Oreka wrote %u bytes! (write)\n", nframe->datalen);
+					}
+				} else {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to write %u bytes! (write)\n", nframe->datalen);
+				}
+			}
+		}
+		break;
 	default:
 		break;
 	}
-
 	return SWITCH_TRUE;
 }
 
 
-SWITCH_STANDARD_APP(oreka_start_function)
+SWITCH_STANDARD_APP(oreka_record_function)
 {
 	switch_status_t status;
 	switch_channel_t *channel = switch_core_session_get_channel(session);
 	oreka_session_t *oreka = NULL;
 	switch_media_bug_t *bug = NULL;
-	char *argv[6];
-	int argc;
-    int flags = 0;
-	char *lbuf = NULL;
-    const char *var;
+	switch_memory_pool_t *pool = NULL;
+	int flags = 0;
+	const char *var;
 
 	if ((oreka = (oreka_session_t *) switch_channel_get_private(channel, OREKA_PRIVATE))) {
 		if (!zstr(data) && !strcasecmp(data, "stop")) {
@@ -607,28 +652,58 @@ SWITCH_STANDARD_APP(oreka_start_function)
 	switch_assert(oreka);
 	memset(oreka, 0, sizeof(*oreka));
 
-    oreka->mux_streams = globals.mux_streams;
+	oreka->native_streams = globals.native_streams;
+	if ((var = switch_channel_get_variable(channel, "oreka_native_streams"))) {
+		oreka->native_streams = switch_true(var);
+	}
 
-    if ((var = switch_channel_get_variable(channel, "oreka_mux_streams"))) {
-        oreka->mux_streams = switch_true(var);
-    }
+	oreka->mux_streams = globals.mux_streams;
+	if ((var = switch_channel_get_variable(channel, "oreka_mux_streams"))) {
+		oreka->mux_streams = switch_true(var);
+	}
 
-	if (data && (lbuf = switch_core_session_strdup(session, data))
-		&& (argc = switch_separate_string(lbuf, ' ', argv, (sizeof(argv) / sizeof(argv[0]))))) {
-#if 0
-		if (!strncasecmp(argv[x], "server", sizeof("server"))) {
-			/* parse server=192.168.1.144 string */
+	if (oreka->native_streams && oreka->mux_streams) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "Muxing and native stream options are not supported at the same time, disabling muxing for this session\n");
+		oreka->mux_streams = 0;
+	}
+
+	if ((var = switch_channel_get_variable(channel, "oreka_sip_port"))) {
+		oreka->sip_server_port = atoi(var);
+	} else {
+		oreka->sip_server_port = globals.sip_server_port;
+	}
+
+	pool = switch_core_session_get_pool(session);
+	if ((var = switch_channel_get_variable(channel, "oreka_sip_server"))) {
+		snprintf(oreka->sip_server_addr_str, sizeof(oreka->sip_server_addr_str), "%s", var);
+		switch_sockaddr_info_get(&oreka->sip_server_addr, oreka->sip_server_addr_str, SWITCH_UNSPEC,
+								oreka->sip_server_port, 0, pool);
+		if (!oreka->sip_server_addr) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Invalid sip server address specified: %s!\n", var);
+			return;
 		}
-#endif
+
+		if (switch_socket_create(&oreka->sip_socket, switch_sockaddr_get_family(oreka->sip_server_addr), SOCK_DGRAM, 0, pool) != SWITCH_STATUS_SUCCESS) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to create socket!\n");
+			return;
+		}
+		switch_get_addr(oreka->sip_server_ipv4_str, sizeof(oreka->sip_server_ipv4_str), oreka->sip_server_addr);
+	} else {
+		snprintf(oreka->sip_server_addr_str, sizeof(oreka->sip_server_addr_str), "%s", globals.sip_server_addr_str);
+		snprintf(oreka->sip_server_ipv4_str, sizeof(oreka->sip_server_ipv4_str), "%s", globals.sip_server_ipv4_str);
+		oreka->sip_server_addr = globals.sip_server_addr;
+		oreka->sip_socket = globals.sip_socket;
 	}
 
 	oreka->session = session;
 
-    if (oreka->mux_streams) {
-        flags = SMBF_READ_STREAM | SMBF_WRITE_STREAM | SMBF_READ_PING | SMBF_ANSWER_REQ;
-    } else {
-        flags = SMBF_READ_REPLACE | SMBF_WRITE_REPLACE | SMBF_ANSWER_REQ;
-    }
+	if (oreka->native_streams) {
+		flags = SMBF_TAP_NATIVE_READ | SMBF_TAP_NATIVE_WRITE | SMBF_ANSWER_REQ;
+	} else if (oreka->mux_streams) {
+		flags = SMBF_READ_STREAM | SMBF_WRITE_STREAM | SMBF_READ_PING | SMBF_ANSWER_REQ;
+	} else {
+		flags = SMBF_READ_REPLACE | SMBF_WRITE_REPLACE | SMBF_ANSWER_REQ;
+	}
 
 	status = switch_core_media_bug_add(session, OREKA_BUG_NAME_READ, NULL, oreka_audio_callback, oreka, 0, flags, &bug);
 
@@ -637,11 +712,8 @@ SWITCH_STANDARD_APP(oreka_start_function)
 		return;
 	}
 	oreka->read_bug = bug;
-	oreka->usecnt++;
-	bug = NULL;
-	oreka->usecnt++;
+	oreka->usecnt = oreka->mux_streams ? 1 : 2;
 	switch_channel_set_private(channel, OREKA_PRIVATE, oreka);
-
 }
 
 #define OREKA_XML_CONFIG "oreka.conf"
@@ -663,7 +735,27 @@ static int load_config(void)
 			} else if (!strcasecmp(var, "sip-server-port")) {
 				globals.sip_server_port = atoi(val);
 			} else if (!strcasecmp(var, "mux-all-streams")) {
-                globals.mux_streams = 1;
+				uint8_t enable = switch_true(val);
+				if (enable) {
+					if (!globals.native_streams) {
+						globals.mux_streams = 1;
+					} else {
+						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Ignoring mux-all-streams parameter because native-streams was set to true before\n");
+					}
+				} else {
+					globals.mux_streams = 0;
+				}
+			} else if (!strcasecmp(var, "native-streams")) {
+				uint8_t enable = switch_true(val);
+				if (enable) {
+					if (!globals.mux_streams) {
+						globals.native_streams = 1;
+					} else {
+						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Ignoring native-streams parameter because mux-all-streams was set to true before\n");
+					}
+				} else {
+					globals.native_streams = 0;
+				}
 			}
 		}
 	}
@@ -676,15 +768,6 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_oreka_load)
 {
 	switch_application_interface_t *app_interface = NULL;
 	int mask = 0;
-#if 0
-	switch_status_t status = SWITCH_STATUS_FALSE;
-	int x = 0;
-	switch_size_t len = 0;
-	switch_size_t ilen = 0;
-	char dummy_output[] = "Parangaricutirimicuaro";
-	char dummy_input[sizeof(dummy_output)] = "";
-	switch_sockaddr_t *from_addr = NULL;
-#endif
 
 	memset(&globals, 0, sizeof(globals));
 
@@ -702,9 +785,7 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_oreka_load)
 		return SWITCH_STATUS_UNLOAD;
 	}
 
-	//switch_sockaddr_info_get(&globals.sip_server_addr, "sigchld.sangoma.local", SWITCH_UNSPEC, 5080, 0, pool);
 	switch_sockaddr_info_get(&globals.sip_server_addr, globals.sip_server_addr_str, SWITCH_UNSPEC, globals.sip_server_port, 0, pool);
-
 	if (!globals.sip_server_addr) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Invalid sip server address specified: %s!\n", globals.sip_server_addr_str);
 		return SWITCH_STATUS_UNLOAD;
@@ -723,50 +804,10 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_oreka_load)
 		"Loading mod_oreka, sip_server_addr=%s, sip_server_ipv4_str=%s, sip_server_port=%d, local_ipv4_str=%s\n",
 		globals.sip_server_addr_str, globals.sip_server_ipv4_str, globals.sip_server_port, globals.local_ipv4_str);
 
-#if 0
-	if (switch_socket_bind(globals.sip_socket, globals.sip_addr) != SWITCH_STATUS_SUCCESS) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to bind to SIP address: %s!\n", strerror(errno));
-		return SWITCH_STATUS_UNLOAD;
-	}
-#endif
-
-#if 0
-	len = sizeof(dummy_output);
-#ifndef WIN32
-	switch_socket_opt_set(globals.sip_socket, SWITCH_SO_NONBLOCK, TRUE);
-
-	status = switch_socket_sendto(globals.sip_socket, globals.sip_addr, 0, (void *)dummy_output, &len);
-	if (status != SWITCH_STATUS_SUCCESS) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to send UDP message! (status=%d)\n", status);
-	}
-
-	status = switch_sockaddr_create(&from_addr, pool);
-	if (status != SWITCH_STATUS_SUCCESS) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to creat socket address\n");
-	}
-
-	while (!ilen) {
-		ilen = sizeof(dummy_input);
-		status = switch_socket_recvfrom(from_addr, globals.sip_socket, 0, (void *)dummy_input, &ilen);
-		if (status != SWITCH_STATUS_SUCCESS && status != SWITCH_STATUS_BREAK) {
-			break;
-		}
-
-		if (++x > 1000) {
-			break;
-		}
-
-		switch_cond_next();
-	}
-
-	switch_socket_opt_set(globals.sip_socket, SWITCH_SO_NONBLOCK, FALSE);
-#endif
-#endif
-
 	*module_interface = switch_loadable_module_create_module_interface(pool, modname);
 
 	SWITCH_ADD_APP(app_interface, "oreka_record", "Send media to Oreka recording server", "Send media to Oreka recording server",
-	oreka_start_function, "[stop]", SAF_NONE);
+	oreka_record_function, "[stop]", SAF_NONE);
 	return SWITCH_STATUS_SUCCESS;
 }
 
