@@ -675,7 +675,7 @@ SWITCH_STANDARD_APP(oreka_record_function)
 	oreka->sip_server_addr = globals.sip_server_addr; // addr where we send SIP messages to
 	oreka->sip_server_port = globals.sip_server_port; // port where we send SIP messages to
 	switch_copy_string(oreka->local_ipv4_str, globals.local_ipv4_str, sizeof(oreka->local_ipv4_str)); // local ip to send SIP/RTP from
-	oreka->local_port = globals.local_port; // local port to send SIP from
+	oreka->local_port = 0; // Dynamic by default, do not inherit the global port config
 	oreka->sip_socket = globals.sip_socket; // local socket used to send SIP
 
 	oreka->native_streams = globals.native_streams;
